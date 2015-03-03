@@ -27,7 +27,13 @@ import (
 // is an adaptation of conversion's Scheme for our API objects.
 type Scheme struct {
 	raw *conversion.Scheme
+	// Map from version and resource to the corresponding func to convert
+	// resource field labels in that version to internal version.
+	fieldLabelConversionFuncs map[string]map[string]FieldLabelConversionFunc
 }
+
+// Function to convert a field selector to internal representation.
+type FieldLabelConversionFunc func(label, value string) (internalLabel, internalValue string, err error)
 
 // fromScope gets the input version, desired output version, and desired Scheme
 // from a conversion.Scope.
@@ -95,7 +101,7 @@ func (self *Scheme) embeddedObjectToRawExtension(in *EmbeddedObject, out *RawExt
 // given in conversion.Scope. It's placed in all schemes as a ConversionFunc to enable plugins;
 // see the comment for RawExtension.
 func (self *Scheme) rawExtensionToEmbeddedObject(in *RawExtension, out *EmbeddedObject, s conversion.Scope) error {
-	if len(in.RawJSON) == 4 && string(in.RawJSON) == "null" {
+	if len(in.RawJSON) == 0 || (len(in.RawJSON) == 4 && string(in.RawJSON) == "null") {
 		out.Object = nil
 		return nil
 	}
@@ -200,7 +206,7 @@ func (self *Scheme) rawExtensionToRuntimeObjectArray(in *[]RawExtension, out *[]
 
 // NewScheme creates a new Scheme. This scheme is pluggable by default.
 func NewScheme() *Scheme {
-	s := &Scheme{conversion.NewScheme()}
+	s := &Scheme{conversion.NewScheme(), map[string]map[string]FieldLabelConversionFunc{}}
 	s.raw.InternalVersion = ""
 	s.raw.MetaFactory = conversion.SimpleMetaFactory{BaseFields: []string{"TypeMeta"}, VersionField: "APIVersion", KindField: "Kind"}
 	if err := s.raw.AddConversionFuncs(
@@ -265,7 +271,8 @@ func (s *Scheme) Log(l conversion.DebugLogger) {
 
 // AddConversionFuncs adds a function to the list of conversion functions. The given
 // function should know how to convert between two API objects. We deduce how to call
-// it from the types of its two parameters; see the comment for Converter.Register.
+// it from the types of its two parameters; see the comment for
+// Converter.RegisterConversionFunction.
 //
 // Note that, if you need to copy sub-objects that didn't change, it's safe to call
 // Convert() inside your conversionFuncs, as long as you don't start a conversion
@@ -279,6 +286,17 @@ func (s *Scheme) AddConversionFuncs(conversionFuncs ...interface{}) error {
 	return s.raw.AddConversionFuncs(conversionFuncs...)
 }
 
+// AddFieldLabelConversionFunc adds a conversion function to convert field selectors
+// of the given api resource from the given version to internal version representation.
+func (s *Scheme) AddFieldLabelConversionFunc(version, apiResource string, conversionFunc FieldLabelConversionFunc) error {
+	if s.fieldLabelConversionFuncs[version] == nil {
+		s.fieldLabelConversionFuncs[version] = map[string]FieldLabelConversionFunc{}
+	}
+
+	s.fieldLabelConversionFuncs[version][apiResource] = conversionFunc
+	return nil
+}
+
 // AddStructFieldConversion allows you to specify a mechanical copy for a moved
 // or renamed struct field without writing an entire conversion function. See
 // the comment in conversion.Converter.SetStructFieldCopy for parameter details.
@@ -287,11 +305,30 @@ func (s *Scheme) AddStructFieldConversion(srcFieldType interface{}, srcFieldName
 	return s.raw.AddStructFieldConversion(srcFieldType, srcFieldName, destFieldType, destFieldName)
 }
 
+// AddDefaultingFuncs adds a function to the list of value-defaulting functions.
+// We deduce how to call it from the types of its two parameters; see the
+// comment for Converter.RegisterDefaultingFunction.
+func (s *Scheme) AddDefaultingFuncs(defaultingFuncs ...interface{}) error {
+	return s.raw.AddDefaultingFuncs(defaultingFuncs...)
+}
+
 // Convert will attempt to convert in into out. Both must be pointers.
 // For easy testing of conversion functions. Returns an error if the conversion isn't
 // possible.
 func (s *Scheme) Convert(in, out interface{}) error {
 	return s.raw.Convert(in, out)
+}
+
+// Converts the given field label and value for an apiResource field selector from
+// versioned representation to an unversioned one.
+func (s *Scheme) ConvertFieldLabel(version, apiResource, label, value string) (string, string, error) {
+	if typeFuncMap, ok := s.fieldLabelConversionFuncs[version]; ok {
+		if conversionFunc, ok := typeFuncMap[apiResource]; ok {
+			return conversionFunc(label, value)
+		}
+	}
+	// Don't fail on types we haven't added conversion funcs for yet.
+	return label, value, nil
 }
 
 // ConvertToVersion attempts to convert an input object to its matching Kind in another

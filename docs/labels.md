@@ -11,6 +11,15 @@ key/value labels set on it, with at most one label with a particular key.
 }
 ```
 
+While there are no restrictions on the format of label values, label keys must be of the form:
+```
+label-key ::= prefixed-name | name
+prefixed-name ::= prefix '/' name
+prefix ::= DNS_SUBDOMAIN
+name ::= DNS_LABEL
+```
+DNS_LABEL and DNS_SUBDOMAIN are defined in the [identifiers design doc](/docs/design/identifiers.md). The prefix is optional. If the prefix is not specified, the key is assumed to be private to the user. Other system components that wish to use labels must specify a prefix. The "kubernetes.io/" prefix is reserved for use by kubernetes components.
+
 Unlike [names and UIDs](identifiers.md), labels do not provide uniqueness. In general, we expect many objects to carry the same label(s). 
 
 Via a _label selector_, the client/user can identify a set of objects. The label selector is the core grouping primitive in Kubernetes. 
@@ -24,6 +33,7 @@ dimensions, such as:
    - `tier=frontend`, `tier=backend`, ...
    - `partition=customerA`, `partition=customerB`, ...
    - `track=daily`, `track=weekly`
+
 These are just examples; you are free to develop your own conventions.
 
 Label selectors permit very simple filtering by label keys and values.   Currently, label selectors only support these forms:

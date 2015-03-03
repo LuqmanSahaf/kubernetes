@@ -26,14 +26,10 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/conversion"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/coreos/go-etcd/etcd"
 )
-
-type fakeClientGetSet struct {
-	get func(key string, sort, recursive bool) (*etcd.Response, error)
-	set func(key, value string, ttl uint64) (*etcd.Response, error)
-}
 
 type TestResource struct {
 	api.TypeMeta   `json:",inline"`
@@ -52,6 +48,12 @@ func init() {
 	scheme.AddKnownTypes("", &TestResource{})
 	scheme.AddKnownTypes("v1beta1", &TestResource{})
 	codec = runtime.CodecFor(scheme, "v1beta1")
+	scheme.AddConversionFuncs(
+		func(in *TestResource, out *TestResource, s conversion.Scope) error {
+			*out = *in
+			return nil
+		},
+	)
 }
 
 func TestIsEtcdNotFound(t *testing.T) {
@@ -72,17 +74,24 @@ func TestExtractToList(t *testing.T) {
 		R: &etcd.Response{
 			EtcdIndex: 10,
 			Node: &etcd.Node{
+				Dir: true,
 				Nodes: []*etcd.Node{
 					{
+						Key:           "/foo",
 						Value:         `{"id":"foo","kind":"Pod","apiVersion":"v1beta1"}`,
+						Dir:           false,
 						ModifiedIndex: 1,
 					},
 					{
+						Key:           "/bar",
 						Value:         `{"id":"bar","kind":"Pod","apiVersion":"v1beta1"}`,
+						Dir:           false,
 						ModifiedIndex: 2,
 					},
 					{
+						Key:           "/baz",
 						Value:         `{"id":"baz","kind":"Pod","apiVersion":"v1beta1"}`,
+						Dir:           false,
 						ModifiedIndex: 3,
 					},
 				},
@@ -92,9 +101,27 @@ func TestExtractToList(t *testing.T) {
 	expect := api.PodList{
 		ListMeta: api.ListMeta{ResourceVersion: "10"},
 		Items: []api.Pod{
-			{ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"}},
-			{ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"}},
-			{ObjectMeta: api.ObjectMeta{Name: "baz", ResourceVersion: "3"}},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "baz", ResourceVersion: "3"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
 		},
 	}
 
@@ -116,22 +143,34 @@ func TestExtractToListAcrossDirectories(t *testing.T) {
 		R: &etcd.Response{
 			EtcdIndex: 10,
 			Node: &etcd.Node{
+				Dir: true,
 				Nodes: []*etcd.Node{
 					{
+						Key:   "/directory1",
 						Value: `{"name": "directory1"}`,
 						Dir:   true,
 						Nodes: []*etcd.Node{
 							{
+								Key:           "/foo",
 								Value:         `{"id":"foo","kind":"Pod","apiVersion":"v1beta1"}`,
+								Dir:           false,
+								ModifiedIndex: 1,
+							},
+							{
+								Key:           "/baz",
+								Value:         `{"id":"baz","kind":"Pod","apiVersion":"v1beta1"}`,
+								Dir:           false,
 								ModifiedIndex: 1,
 							},
 						},
 					},
 					{
+						Key:   "/directory2",
 						Value: `{"name": "directory2"}`,
 						Dir:   true,
 						Nodes: []*etcd.Node{
 							{
+								Key:           "/bar",
 								Value:         `{"id":"bar","kind":"Pod","apiVersion":"v1beta1"}`,
 								ModifiedIndex: 2,
 							},
@@ -144,8 +183,28 @@ func TestExtractToListAcrossDirectories(t *testing.T) {
 	expect := api.PodList{
 		ListMeta: api.ListMeta{ResourceVersion: "10"},
 		Items: []api.Pod{
-			{ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"}},
-			{ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"}},
+			// We expect list to be sorted by directory (e.g. namespace) first, then by name.
+			{
+				ObjectMeta: api.ObjectMeta{Name: "baz", ResourceVersion: "1"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
 		},
 	}
 
@@ -166,20 +225,25 @@ func TestExtractToListExcludesDirectories(t *testing.T) {
 		R: &etcd.Response{
 			EtcdIndex: 10,
 			Node: &etcd.Node{
+				Dir: true,
 				Nodes: []*etcd.Node{
 					{
+						Key:           "/foo",
 						Value:         `{"id":"foo","kind":"Pod","apiVersion":"v1beta1"}`,
 						ModifiedIndex: 1,
 					},
 					{
+						Key:           "/bar",
 						Value:         `{"id":"bar","kind":"Pod","apiVersion":"v1beta1"}`,
 						ModifiedIndex: 2,
 					},
 					{
+						Key:           "/baz",
 						Value:         `{"id":"baz","kind":"Pod","apiVersion":"v1beta1"}`,
 						ModifiedIndex: 3,
 					},
 					{
+						Key:   "/directory",
 						Value: `{"name": "directory"}`,
 						Dir:   true,
 					},
@@ -190,9 +254,27 @@ func TestExtractToListExcludesDirectories(t *testing.T) {
 	expect := api.PodList{
 		ListMeta: api.ListMeta{ResourceVersion: "10"},
 		Items: []api.Pod{
-			{ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"}},
-			{ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"}},
-			{ObjectMeta: api.ObjectMeta{Name: "baz", ResourceVersion: "3"}},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "bar", ResourceVersion: "2"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "baz", ResourceVersion: "3"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
+			{
+				ObjectMeta: api.ObjectMeta{Name: "foo", ResourceVersion: "1"},
+				Spec: api.PodSpec{
+					RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+					DNSPolicy:     api.DNSClusterFirst,
+				},
+			},
 		},
 	}
 
@@ -209,7 +291,13 @@ func TestExtractToListExcludesDirectories(t *testing.T) {
 
 func TestExtractObj(t *testing.T) {
 	fakeClient := NewFakeEtcdClient(t)
-	expect := api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
+	expect := api.Pod{
+		ObjectMeta: api.ObjectMeta{Name: "foo"},
+		Spec: api.PodSpec{
+			RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+			DNSPolicy:     api.DNSClusterFirst,
+		},
+	}
 	fakeClient.Set("/some/key", runtime.EncodeOrDie(testapi.Codec(), &expect), 0)
 	helper := EtcdHelper{fakeClient, testapi.Codec(), versioner}
 	var got api.Pod
@@ -287,7 +375,7 @@ func TestSetObj(t *testing.T) {
 	obj := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
 	fakeClient := NewFakeEtcdClient(t)
 	helper := EtcdHelper{fakeClient, testapi.Codec(), versioner}
-	err := helper.SetObj("/some/key", obj)
+	err := helper.SetObj("/some/key", obj, 5)
 	if err != nil {
 		t.Errorf("Unexpected error %#v", err)
 	}
@@ -300,6 +388,10 @@ func TestSetObj(t *testing.T) {
 	if expect != got {
 		t.Errorf("Wanted %v, got %v", expect, got)
 	}
+	if e, a := uint64(5), fakeClient.LastSetTTL; e != a {
+		t.Errorf("Wanted %v, got %v", e, a)
+	}
+
 }
 
 func TestSetObjWithVersion(t *testing.T) {
@@ -316,7 +408,7 @@ func TestSetObjWithVersion(t *testing.T) {
 	}
 
 	helper := EtcdHelper{fakeClient, testapi.Codec(), versioner}
-	err := helper.SetObj("/some/key", obj)
+	err := helper.SetObj("/some/key", obj, 7)
 	if err != nil {
 		t.Fatalf("Unexpected error %#v", err)
 	}
@@ -328,6 +420,9 @@ func TestSetObjWithVersion(t *testing.T) {
 	got := fakeClient.Data["/some/key"].R.Node.Value
 	if expect != got {
 		t.Errorf("Wanted %v, got %v", expect, got)
+	}
+	if e, a := uint64(7), fakeClient.LastSetTTL; e != a {
+		t.Errorf("Wanted %v, got %v", e, a)
 	}
 }
 
@@ -335,7 +430,7 @@ func TestSetObjWithoutResourceVersioner(t *testing.T) {
 	obj := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
 	fakeClient := NewFakeEtcdClient(t)
 	helper := EtcdHelper{fakeClient, testapi.Codec(), nil}
-	err := helper.SetObj("/some/key", obj)
+	err := helper.SetObj("/some/key", obj, 3)
 	if err != nil {
 		t.Errorf("Unexpected error %#v", err)
 	}
@@ -347,6 +442,9 @@ func TestSetObjWithoutResourceVersioner(t *testing.T) {
 	got := fakeClient.Data["/some/key"].R.Node.Value
 	if expect != got {
 		t.Errorf("Wanted %v, got %v", expect, got)
+	}
+	if e, a := uint64(3), fakeClient.LastSetTTL; e != a {
+		t.Errorf("Wanted %v, got %v", e, a)
 	}
 }
 
@@ -358,7 +456,7 @@ func TestAtomicUpdate(t *testing.T) {
 	// Create a new node.
 	fakeClient.ExpectNotFoundGet("/some/key")
 	obj := &TestResource{ObjectMeta: api.ObjectMeta{Name: "foo"}, Value: 1}
-	err := helper.AtomicUpdate("/some/key", &TestResource{}, func(in runtime.Object) (runtime.Object, error) {
+	err := helper.AtomicUpdate("/some/key", &TestResource{}, true, func(in runtime.Object) (runtime.Object, error) {
 		return obj, nil
 	})
 	if err != nil {
@@ -377,7 +475,7 @@ func TestAtomicUpdate(t *testing.T) {
 	// Update an existing node.
 	callbackCalled := false
 	objUpdate := &TestResource{ObjectMeta: api.ObjectMeta{Name: "foo"}, Value: 2}
-	err = helper.AtomicUpdate("/some/key", &TestResource{}, func(in runtime.Object) (runtime.Object, error) {
+	err = helper.AtomicUpdate("/some/key", &TestResource{}, true, func(in runtime.Object) (runtime.Object, error) {
 		callbackCalled = true
 
 		if in.(*TestResource).Value != 1 {
@@ -412,7 +510,7 @@ func TestAtomicUpdateNoChange(t *testing.T) {
 	// Create a new node.
 	fakeClient.ExpectNotFoundGet("/some/key")
 	obj := &TestResource{ObjectMeta: api.ObjectMeta{Name: "foo"}, Value: 1}
-	err := helper.AtomicUpdate("/some/key", &TestResource{}, func(in runtime.Object) (runtime.Object, error) {
+	err := helper.AtomicUpdate("/some/key", &TestResource{}, true, func(in runtime.Object) (runtime.Object, error) {
 		return obj, nil
 	})
 	if err != nil {
@@ -422,16 +520,42 @@ func TestAtomicUpdateNoChange(t *testing.T) {
 	// Update an existing node with the same data
 	callbackCalled := false
 	objUpdate := &TestResource{ObjectMeta: api.ObjectMeta{Name: "foo"}, Value: 1}
-	fakeClient.Err = errors.New("should not be called")
-	err = helper.AtomicUpdate("/some/key", &TestResource{}, func(in runtime.Object) (runtime.Object, error) {
+	err = helper.AtomicUpdate("/some/key", &TestResource{}, true, func(in runtime.Object) (runtime.Object, error) {
+		fakeClient.Err = errors.New("should not be called")
 		callbackCalled = true
 		return objUpdate, nil
 	})
 	if err != nil {
-		t.Errorf("Unexpected error %#v", err)
+		t.Fatalf("Unexpected error %#v", err)
 	}
 	if !callbackCalled {
 		t.Errorf("tryUpdate callback should have been called.")
+	}
+}
+
+func TestAtomicUpdateKeyNotFound(t *testing.T) {
+	fakeClient := NewFakeEtcdClient(t)
+	fakeClient.TestIndex = true
+	helper := EtcdHelper{fakeClient, codec, versioner}
+
+	// Create a new node.
+	fakeClient.ExpectNotFoundGet("/some/key")
+	obj := &TestResource{ObjectMeta: api.ObjectMeta{Name: "foo"}, Value: 1}
+
+	f := func(in runtime.Object) (runtime.Object, error) {
+		return obj, nil
+	}
+
+	ignoreNotFound := false
+	err := helper.AtomicUpdate("/some/key", &TestResource{}, ignoreNotFound, f)
+	if err == nil {
+		t.Errorf("Expected error for key not found.")
+	}
+
+	ignoreNotFound = true
+	err = helper.AtomicUpdate("/some/key", &TestResource{}, ignoreNotFound, f)
+	if err != nil {
+		t.Errorf("Unexpected error %v.", err)
 	}
 }
 
@@ -454,7 +578,7 @@ func TestAtomicUpdate_CreateCollision(t *testing.T) {
 			defer wgDone.Done()
 
 			firstCall := true
-			err := helper.AtomicUpdate("/some/key", &TestResource{}, func(in runtime.Object) (runtime.Object, error) {
+			err := helper.AtomicUpdate("/some/key", &TestResource{}, true, func(in runtime.Object) (runtime.Object, error) {
 				defer func() { firstCall = false }()
 
 				if firstCall {

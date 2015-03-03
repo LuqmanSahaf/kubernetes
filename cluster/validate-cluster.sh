@@ -32,7 +32,8 @@ get-password
 detect-master > /dev/null
 detect-minions > /dev/null
 
-MINIONS_FILE=/tmp/minions
+MINIONS_FILE=/tmp/minions-$$
+trap 'rm -rf "${MINIONS_FILE}"' EXIT
 # Make several attempts to deal with slow cluster birth.
 attempt=0
 while true; do
@@ -43,6 +44,7 @@ while true; do
   else
     if (( attempt > 5 )); then
       echo -e "${color_red}Detected ${found} nodes out of ${NUM_MINIONS}. Your cluster may not be working. ${color_norm}"
+      cat -n "${MINIONS_FILE}"
       exit 2
     fi
     attempt=$((attempt+1))
@@ -50,9 +52,10 @@ while true; do
   fi
 done
 echo "Found ${found} nodes."
+cat -n "${MINIONS_FILE}"
 
 # On vSphere, use minion IPs as their names
-if [[ "${KUBERNETES_PROVIDER}" == "vsphere" ]] || [[ "${KUBERNETES_PROVIDER}" == "vagrant" ]]; then
+if [[ "${KUBERNETES_PROVIDER}" == "vsphere" ]] || [[ "${KUBERNETES_PROVIDER}" == "vagrant" ]] || [[ "${KUBERNETES_PROVIDER}" == "libvirt-coreos" ]]; then
   MINION_NAMES=("${KUBE_MINION_IP_ADDRESSES[@]}")
 fi
 
@@ -61,11 +64,12 @@ for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
     count=$(grep -c "${MINION_NAMES[$i]}" "${MINIONS_FILE}") || :
     if [[ "${count}" == "0" ]]; then
       echo -e "${color_red}Failed to find ${MINION_NAMES[$i]}, cluster is probably broken.${color_norm}"
+      cat -n "${MINIONS_FILE}"
       exit 1
     fi
 
     name="${MINION_NAMES[$i]}"
-    if [ "$KUBERNETES_PROVIDER" != "vsphere" ] && [ "$KUBERNETES_PROVIDER" != "vagrant" ]; then
+    if [ "$KUBERNETES_PROVIDER" != "vsphere" ] && [ "$KUBERNETES_PROVIDER" != "vagrant" ] && [ "$KUBERNETES_PROVIDER" != "libvirt-coreos" ]; then
       # Grab fully qualified name
       name=$(grep "${MINION_NAMES[$i]}\." "${MINIONS_FILE}")
     fi
@@ -75,8 +79,13 @@ for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
     attempt=0
     while true; do
       echo -n "Attempt $((attempt+1)) at checking Kubelet installation on node ${MINION_NAMES[$i]} ..."
-      curl_output=$(curl -s --insecure --user "${KUBE_USER}:${KUBE_PASSWORD}" \
+      if [ "$KUBERNETES_PROVIDER" != "libvirt-coreos" ]; then
+        curl_output=$(curl -s --insecure --user "${KUBE_USER}:${KUBE_PASSWORD}" \
           "https://${KUBE_MASTER_IP}/api/v1beta1/proxy/minions/${name}/healthz")
+      else
+        curl_output=$(curl -s \
+          "http://${KUBE_MASTER_IP}:8080/api/v1beta1/proxy/minions/${name}/healthz")
+      fi
       if [[ "${curl_output}" != "ok" ]]; then
           if (( attempt > 5 )); then
             echo

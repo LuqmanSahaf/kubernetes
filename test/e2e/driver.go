@@ -17,145 +17,72 @@ limitations under the License.
 package e2e
 
 import (
-	"math/rand"
-	"time"
+	"fmt"
+	"path"
+	"regexp"
+	"strings"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
+	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/config"
+	"github.com/onsi/ginkgo/reporters"
+	"github.com/onsi/gomega"
 )
 
-type testSpec struct {
-	// The test to run
-	test func(c *client.Client) bool
-	// The human readable name of this test
-	name string
+type testResult bool
+
+type GCEConfig struct {
+	ProjectID  string
+	Zone       string
+	MasterName string
 }
 
-type testInfo struct {
-	passed bool
-	spec   testSpec
+func init() {
+	// Turn on verbose by default to get spec names
+	config.DefaultReporterConfig.Verbose = true
+
+	// Turn on EmitSpecProgress to get spec progress (especially on interrupt)
+	config.GinkgoConfig.EmitSpecProgress = true
+
+	// Randomize specs as well as suites
+	config.GinkgoConfig.RandomizeAllSpecs = true
 }
 
-// Output a summary in the TAP (test anything protocol) format for automated processing.
-// See http://testanything.org/ for more info
-func outputTAPSummary(infoList []testInfo) {
-	glog.Infof("1..%d", len(infoList))
-	for i, info := range infoList {
-		if info.passed {
-			glog.Infof("ok %d - %s", i+1, info.spec.name)
-		} else {
-			glog.Infof("not ok %d - %s", i+1, info.spec.name)
-		}
-	}
-}
-
-// Fisher-Yates shuffle using the given RNG r
-func shuffleTests(tests []testSpec, r *rand.Rand) {
-	for i := len(tests) - 1; i > 0; i-- {
-		j := r.Intn(i + 1)
-		tests[i], tests[j] = tests[j], tests[i]
-	}
-}
+func (t *testResult) Fail() { *t = false }
 
 // Run each Go end-to-end-test. This function assumes the
 // creation of a test cluster.
-func RunE2ETests(authConfig, certDir, host, repoRoot, provider string, orderseed int64, times int, testList []string) {
-	testContext = testContextType{authConfig, certDir, host, repoRoot, provider}
+func RunE2ETests(authConfig, certDir, host, repoRoot, provider string, gceConfig *GCEConfig, orderseed int64, times int, reportDir string, testList []string) {
+	testContext = testContextType{authConfig, certDir, host, repoRoot, provider, *gceConfig}
 	util.ReallyCrash = true
 	util.InitLogs()
 	defer util.FlushLogs()
 
-	// TODO: Associate a timeout with each test individually.
-	go func() {
-		defer util.FlushLogs()
-		// TODO: We should modify testSpec to include an estimated running time
-		//       for each test and use that information to estimate a timeout
-		//       value. Until then, as we add more tests (and before we move to
-		//       parallel testing) we need to adjust this value as we add more tests.
-		time.Sleep(15 * time.Minute)
-		glog.Fatalf("This test has timed out. Cleanup not guaranteed.")
-	}()
-
-	tests := []testSpec{
-		{TestKubernetesROService, "TestKubernetesROService"},
-		{TestKubeletSendsEvent, "TestKubeletSendsEvent"},
-		{TestImportantURLs, "TestImportantURLs"},
-		{TestPodUpdate, "TestPodUpdate"},
-		{TestNetwork, "TestNetwork"},
-		{TestClusterDNS, "TestClusterDNS"},
-		{TestPodHasServiceEnvVars, "TestPodHasServiceEnvVars"},
-		{TestBasic, "TestBasic"},
-		{TestPrivate, "TestPrivate"},
-		{TestLivenessHttp, "TestLivenessHttp"},
-		{TestLivenessExec, "TestLivenessExec"},
+	if len(testList) != 0 {
+		if config.GinkgoConfig.FocusString != "" || config.GinkgoConfig.SkipString != "" {
+			glog.Fatal("Either specify --test/-t or --ginkgo.focus/--ginkgo.skip but not both.")
+		}
+		var testRegexps []string
+		for _, t := range testList {
+			testRegexps = append(testRegexps, regexp.QuoteMeta(t))
+		}
+		config.GinkgoConfig.FocusString = `\b(` + strings.Join(testRegexps, "|") + `)\b`
 	}
 
-	// Check testList for non-existent tests and populate a StringSet with tests to run.
-	validTestNames := util.NewStringSet()
-	for _, test := range tests {
-		validTestNames.Insert(test.name)
-	}
-	runTestNames := util.NewStringSet()
-	for _, testName := range testList {
-		if validTestNames.Has(testName) {
-			runTestNames.Insert(testName)
-		} else {
-			glog.Warningf("Requested test %s does not exist", testName)
+	// TODO: Make orderseed work again.
+
+	var passed testResult = true
+	gomega.RegisterFailHandler(ginkgo.Fail)
+	// Run the existing tests with output to console + JUnit for Jenkins
+	for i := 0; i < times && passed; i++ {
+		var r []ginkgo.Reporter
+		if reportDir != "" {
+			r = append(r, reporters.NewJUnitReporter(path.Join(reportDir, fmt.Sprintf("junit_%d.xml", i+1))))
 		}
+		ginkgo.RunSpecsWithDefaultAndCustomReporters(&passed, fmt.Sprintf("Kubernetes e2e Suite run %d of %d", i+1, times), r)
 	}
 
-	// if testList was specified, filter down now before we expand and shuffle
-	if len(testList) > 0 {
-		newTests := make([]testSpec, 0)
-		for i, test := range tests {
-			// Check if this test is supposed to run, either if listed explicitly in
-			// a --test flag or if no --test flags were supplied.
-			if !runTestNames.Has(test.name) {
-				glog.Infof("Skipping test %d %s", i+1, test.name)
-				continue
-			}
-			newTests = append(newTests, test)
-		}
-		tests = newTests
-	}
-	if times != 1 {
-		newTests := make([]testSpec, 0, times*len(tests))
-		for i := 0; i < times; i++ {
-			newTests = append(newTests, tests...)
-		}
-		tests = newTests
-	}
-	if orderseed == 0 {
-		// Use low order bits of NanoTime as the default seed. (Using
-		// all the bits makes for a long, very similar looking seed
-		// between runs.)
-		orderseed = time.Now().UnixNano() & (1<<32 - 1)
-	}
-	// TODO(satnam6502): When the tests are run in parallel we will
-	//                   no longer need the shuffle.
-	shuffleTests(tests, rand.New(rand.NewSource(orderseed)))
-	glog.Infof("Tests shuffled with orderseed %#x\n", orderseed)
-
-	info := []testInfo{}
-	passed := true
-	for i, test := range tests {
-		glog.Infof("Running test %d %s", i+1, test.name)
-		// A client is made for each test. This allows us to attribute
-		// issues with rate ACLs etc. to a specific test and supports
-		// parallel testing.
-		testPassed := test.test(loadClientOrDie())
-		if !testPassed {
-			glog.Infof("        test %d failed", i+1)
-			passed = false
-		} else {
-			glog.Infof("        test %d passed", i+1)
-		}
-		// TODO: clean up objects created during a test after the test, so cases
-		// are independent.
-		info = append(info, testInfo{testPassed, test})
-	}
-	outputTAPSummary(info)
 	if !passed {
 		glog.Fatalf("At least one test failed")
 	} else {

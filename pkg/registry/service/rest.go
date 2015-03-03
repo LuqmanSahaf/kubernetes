@@ -20,11 +20,12 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/rest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/minion"
@@ -35,14 +36,16 @@ import (
 
 // REST adapts a service registry into apiserver's RESTStorage model.
 type REST struct {
-	registry  Registry
-	cloud     cloudprovider.Interface
-	machines  minion.Registry
-	portalMgr *ipAllocator
+	registry    Registry
+	cloud       cloudprovider.Interface
+	machines    minion.Registry
+	portalMgr   *ipAllocator
+	clusterName string
 }
 
 // NewREST returns a new REST.
-func NewREST(registry Registry, cloud cloudprovider.Interface, machines minion.Registry, portalNet *net.IPNet) *REST {
+func NewREST(registry Registry, cloud cloudprovider.Interface, machines minion.Registry, portalNet *net.IPNet,
+	clusterName string) *REST {
 	// TODO: Before we can replicate masters, this has to be synced (e.g. lives in etcd)
 	ipa := newIPAllocator(portalNet)
 	if ipa == nil {
@@ -51,10 +54,11 @@ func NewREST(registry Registry, cloud cloudprovider.Interface, machines minion.R
 	reloadIPsFromStorage(ipa, registry)
 
 	return &REST{
-		registry:  registry,
-		cloud:     cloud,
-		machines:  machines,
-		portalMgr: ipa,
+		registry:    registry,
+		cloud:       cloud,
+		machines:    machines,
+		portalMgr:   ipa,
+		clusterName: clusterName,
 	}
 }
 
@@ -79,88 +83,44 @@ func reloadIPsFromStorage(ipa *ipAllocator, registry Registry) {
 	}
 }
 
-func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RESTResult, error) {
+func (rs *REST) Create(ctx api.Context, obj runtime.Object) (runtime.Object, error) {
 	service := obj.(*api.Service)
-	if !api.ValidNamespace(ctx, &service.ObjectMeta) {
-		return nil, errors.NewConflict("service", service.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
-	}
-	if errs := validation.ValidateService(service, rs.registry, ctx); len(errs) > 0 {
-		return nil, errors.NewInvalid("service", service.Name, errs)
+
+	if err := rest.BeforeCreate(rest.Services, ctx, obj); err != nil {
+		return nil, err
 	}
 
-	api.FillObjectMetaSystemFields(ctx, &service.ObjectMeta)
-
-	if service.Spec.PortalIP == "" {
+	if len(service.Spec.PortalIP) == 0 {
 		// Allocate next available.
-		if ip, err := rs.portalMgr.AllocateNext(); err != nil {
+		ip, err := rs.portalMgr.AllocateNext()
+		if err != nil {
 			return nil, err
-		} else {
-			service.Spec.PortalIP = ip.String()
 		}
+		service.Spec.PortalIP = ip.String()
 	} else {
 		// Try to respect the requested IP.
 		if err := rs.portalMgr.Allocate(net.ParseIP(service.Spec.PortalIP)); err != nil {
 			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP, err.Error())}
-			return nil, errors.NewInvalid("service", service.Name, el)
+			return nil, errors.NewInvalid("Service", service.Name, el)
 		}
 	}
 
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		// TODO: Consider moving this to a rectification loop, so that we make/remove external load balancers
-		// correctly no matter what http operations happen.
-		// TODO: Get rid of ProxyPort.
-		service.Spec.ProxyPort = 0
-		if service.Spec.CreateExternalLoadBalancer {
-			if rs.cloud == nil {
-				return nil, fmt.Errorf("requested an external service, but no cloud provider supplied.")
-			}
-			if service.Spec.Protocol != api.ProtocolTCP {
-				// TODO: Support UDP here too.
-				return nil, fmt.Errorf("external load balancers for non TCP services are not currently supported.")
-			}
-			balancer, ok := rs.cloud.TCPLoadBalancer()
-			if !ok {
-				return nil, fmt.Errorf("the cloud provider does not support external TCP load balancers.")
-			}
-			zones, ok := rs.cloud.Zones()
-			if !ok {
-				return nil, fmt.Errorf("the cloud provider does not support zone enumeration.")
-			}
-			hosts, err := rs.machines.ListMinions(ctx)
-			if err != nil {
-				return nil, err
-			}
-			zone, err := zones.GetZone()
-			if err != nil {
-				return nil, err
-			}
-			// TODO: We should be able to rely on valid input, and not do defaulting here.
-			var affinityType api.AffinityType = service.Spec.SessionAffinity
-			if affinityType == "" {
-				affinityType = api.AffinityTypeNone
-			}
-			if len(service.Spec.PublicIPs) > 0 {
-				for _, publicIP := range service.Spec.PublicIPs {
-					_, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, net.ParseIP(publicIP), service.Spec.Port, hostsFromMinionList(hosts), affinityType)
-					if err != nil {
-						// TODO: have to roll-back any successful calls.
-						return nil, err
-					}
-				}
-			} else {
-				ip, err := balancer.CreateTCPLoadBalancer(service.Name, zone.Region, nil, service.Spec.Port, hostsFromMinionList(hosts), affinityType)
-				if err != nil {
-					return nil, err
-				}
-				service.Spec.PublicIPs = []string{ip.String()}
-			}
-		}
-		err := rs.registry.CreateService(ctx, service)
+	// TODO: Move this to post-creation rectification loop, so that we make/remove external load balancers
+	// correctly no matter what http operations happen.
+	if service.Spec.CreateExternalLoadBalancer {
+		err := rs.createExternalLoadBalancer(ctx, service)
 		if err != nil {
+			rs.portalMgr.Release(net.ParseIP(service.Spec.PortalIP))
 			return nil, err
 		}
-		return rs.registry.GetService(ctx, service.Name)
-	}), nil
+	}
+
+	if err := rs.registry.CreateService(ctx, service); err != nil {
+		rs.portalMgr.Release(net.ParseIP(service.Spec.PortalIP))
+		err = rest.CheckGeneratedNameError(rest.Services, err, service)
+		return nil, err
+	}
+	return rs.registry.GetService(ctx, service.Name)
 }
 
 func hostsFromMinionList(list *api.NodeList) []string {
@@ -171,16 +131,16 @@ func hostsFromMinionList(list *api.NodeList) []string {
 	return result
 }
 
-func (rs *REST) Delete(ctx api.Context, id string) (<-chan apiserver.RESTResult, error) {
+func (rs *REST) Delete(ctx api.Context, id string) (runtime.Object, error) {
 	service, err := rs.registry.GetService(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	rs.portalMgr.Release(net.ParseIP(service.Spec.PortalIP))
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
+	if service.Spec.CreateExternalLoadBalancer {
 		rs.deleteExternalLoadBalancer(service)
-		return &api.Status{Status: api.StatusSuccess}, rs.registry.DeleteService(ctx, id)
-	}), nil
+	}
+	return &api.Status{Status: api.StatusSuccess}, rs.registry.DeleteService(ctx, id)
 }
 
 func (rs *REST) Get(ctx api.Context, id string) (runtime.Object, error) {
@@ -218,54 +178,111 @@ func (*REST) New() runtime.Object {
 }
 
 func (*REST) NewList() runtime.Object {
-	return &api.Service{}
+	return &api.ServiceList{}
 }
 
-func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan apiserver.RESTResult, error) {
+func (rs *REST) Update(ctx api.Context, obj runtime.Object) (runtime.Object, bool, error) {
 	service := obj.(*api.Service)
 	if !api.ValidNamespace(ctx, &service.ObjectMeta) {
-		return nil, errors.NewConflict("service", service.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
+		return nil, false, errors.NewConflict("service", service.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
 	}
-	if errs := validation.ValidateService(service, rs.registry, ctx); len(errs) > 0 {
-		return nil, errors.NewInvalid("service", service.Name, errs)
+
+	oldService, err := rs.registry.GetService(ctx, service.Name)
+	if err != nil {
+		return nil, false, err
 	}
-	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		cur, err := rs.registry.GetService(ctx, service.Name)
-		if err != nil {
-			return nil, err
+
+	// Copy over non-user fields
+	// TODO: make this a merge function
+	if errs := validation.ValidateServiceUpdate(oldService, service); len(errs) > 0 {
+		return nil, false, errors.NewInvalid("service", service.Name, errs)
+	}
+	// Recreate external load balancer if changed.
+	if externalLoadBalancerNeedsUpdate(oldService, service) {
+		// TODO: support updating existing balancers
+		if oldService.Spec.CreateExternalLoadBalancer {
+			err = rs.deleteExternalLoadBalancer(oldService)
+			if err != nil {
+				return nil, false, err
+			}
 		}
-		if service.Spec.PortalIP != "" && service.Spec.PortalIP != cur.Spec.PortalIP {
-			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP, "field is immutable")}
-			return nil, errors.NewInvalid("service", service.Name, el)
+		if service.Spec.CreateExternalLoadBalancer {
+			err = rs.createExternalLoadBalancer(ctx, service)
+			if err != nil {
+				return nil, false, err
+			}
 		}
-		// Copy over non-user fields.
-		service.Spec.ProxyPort = cur.Spec.ProxyPort
-		// TODO: check to see if external load balancer status changed
-		err = rs.registry.UpdateService(ctx, service)
-		if err != nil {
-			return nil, err
-		}
-		return rs.registry.GetService(ctx, service.Name)
-	}), nil
+	}
+	err = rs.registry.UpdateService(ctx, service)
+	if err != nil {
+		return nil, false, err
+	}
+	out, err := rs.registry.GetService(ctx, service.Name)
+	return out, false, err
 }
 
 // ResourceLocation returns a URL to which one can send traffic for the specified service.
 func (rs *REST) ResourceLocation(ctx api.Context, id string) (string, error) {
-	e, err := rs.registry.GetEndpoints(ctx, id)
+	eps, err := rs.registry.GetEndpoints(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	if len(e.Endpoints) == 0 {
+	if len(eps.Endpoints) == 0 {
 		return "", fmt.Errorf("no endpoints available for %v", id)
 	}
 	// We leave off the scheme ('http://') because we have no idea what sort of server
 	// is listening at this endpoint.
-	return e.Endpoints[rand.Intn(len(e.Endpoints))], nil
+	ep := &eps.Endpoints[rand.Intn(len(eps.Endpoints))]
+	return net.JoinHostPort(ep.IP, strconv.Itoa(ep.Port)), nil
+}
+
+func (rs *REST) createExternalLoadBalancer(ctx api.Context, service *api.Service) error {
+	if rs.cloud == nil {
+		return fmt.Errorf("requested an external service, but no cloud provider supplied.")
+	}
+	if service.Spec.Protocol != api.ProtocolTCP {
+		// TODO: Support UDP here too.
+		return fmt.Errorf("external load balancers for non TCP services are not currently supported.")
+	}
+	balancer, ok := rs.cloud.TCPLoadBalancer()
+	if !ok {
+		return fmt.Errorf("the cloud provider does not support external TCP load balancers.")
+	}
+	zones, ok := rs.cloud.Zones()
+	if !ok {
+		return fmt.Errorf("the cloud provider does not support zone enumeration.")
+	}
+	hosts, err := rs.machines.ListMinions(ctx)
+	if err != nil {
+		return err
+	}
+	zone, err := zones.GetZone()
+	if err != nil {
+		return err
+	}
+	// TODO: We should be able to rely on valid input, and not do defaulting here.
+	var affinityType api.AffinityType = service.Spec.SessionAffinity
+	if len(service.Spec.PublicIPs) > 0 {
+		for _, publicIP := range service.Spec.PublicIPs {
+			_, err = balancer.CreateTCPLoadBalancer(rs.clusterName+"-"+service.Name, zone.Region, net.ParseIP(publicIP), service.Spec.Port, hostsFromMinionList(hosts), affinityType)
+			if err != nil {
+				// TODO: have to roll-back any successful calls.
+				return err
+			}
+		}
+	} else {
+		ip, err := balancer.CreateTCPLoadBalancer(rs.clusterName+"-"+service.Name, zone.Region, nil, service.Spec.Port, hostsFromMinionList(hosts), affinityType)
+		if err != nil {
+			return err
+		}
+		service.Spec.PublicIPs = []string{ip.String()}
+	}
+	return nil
 }
 
 func (rs *REST) deleteExternalLoadBalancer(service *api.Service) error {
-	if !service.Spec.CreateExternalLoadBalancer || rs.cloud == nil {
-		return nil
+	if rs.cloud == nil {
+		return fmt.Errorf("requested an external service, but no cloud provider supplied.")
 	}
 	zones, ok := rs.cloud.Zones()
 	if !ok {
@@ -283,8 +300,29 @@ func (rs *REST) deleteExternalLoadBalancer(service *api.Service) error {
 	if err != nil {
 		return err
 	}
-	if err := balancer.DeleteTCPLoadBalancer(service.Name, zone.Region); err != nil {
+	if err := balancer.DeleteTCPLoadBalancer(rs.clusterName+"-"+service.Name, zone.Region); err != nil {
 		return err
 	}
 	return nil
+}
+
+func externalLoadBalancerNeedsUpdate(old, new *api.Service) bool {
+	if !old.Spec.CreateExternalLoadBalancer && !new.Spec.CreateExternalLoadBalancer {
+		return false
+	}
+	if old.Spec.CreateExternalLoadBalancer != new.Spec.CreateExternalLoadBalancer ||
+		old.Spec.Port != new.Spec.Port ||
+		old.Spec.SessionAffinity != new.Spec.SessionAffinity ||
+		old.Spec.Protocol != new.Spec.Protocol {
+		return true
+	}
+	if len(old.Spec.PublicIPs) != len(new.Spec.PublicIPs) {
+		return true
+	}
+	for i := range old.Spec.PublicIPs {
+		if old.Spec.PublicIPs[i] != new.Spec.PublicIPs[i] {
+			return true
+		}
+	}
+	return false
 }

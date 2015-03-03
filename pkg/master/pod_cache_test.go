@@ -20,12 +20,11 @@ import (
 	"reflect"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/leaky"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/registrytest"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
 type podInfoCall struct {
@@ -73,7 +72,7 @@ func (f *FakePodInfoGetter) GetPodStatus(host, namespace, name string) (api.PodS
 }
 
 func TestPodCacheGetDifferentNamespace(t *testing.T) {
-	cache := NewPodCache(nil, nil, nil, nil)
+	cache := NewPodCache(nil, nil, nil)
 
 	expectedDefault := api.PodStatus{
 		Info: api.PodInfo{
@@ -107,7 +106,7 @@ func TestPodCacheGetDifferentNamespace(t *testing.T) {
 }
 
 func TestPodCacheGet(t *testing.T) {
-	cache := NewPodCache(nil, nil, nil, nil)
+	cache := NewPodCache(nil, nil, nil)
 
 	expected := api.PodStatus{
 		Info: api.PodInfo{
@@ -125,28 +124,62 @@ func TestPodCacheGet(t *testing.T) {
 	}
 }
 
-func TestPodCacheGetMissing(t *testing.T) {
-	cache := NewPodCache(nil, nil, nil, nil)
-
-	status, err := cache.GetPodStatus(api.NamespaceDefault, "foo")
-	if err == nil {
-		t.Errorf("Unexpected non-error: %+v", err)
+func TestPodCacheDelete(t *testing.T) {
+	config := podCacheTestConfig{
+		err: client.ErrPodInfoNotAvailable,
 	}
-	if status != nil {
-		t.Errorf("Unexpected status: %+v", status)
+	cache := config.Construct()
+
+	expected := api.PodStatus{
+		Info: api.PodInfo{
+			"foo": api.ContainerStatus{},
+		},
+	}
+	cache.podStatus[objKey{api.NamespaceDefault, "foo"}] = expected
+
+	info, err := cache.GetPodStatus(api.NamespaceDefault, "foo")
+	if err != nil {
+		t.Errorf("Unexpected error: %+v", err)
+	}
+	if !reflect.DeepEqual(info, &expected) {
+		t.Errorf("Unexpected mismatch. Expected: %+v, Got: %+v", &expected, info)
+	}
+
+	cache.ClearPodStatus(api.NamespaceDefault, "foo")
+
+	_, err = cache.GetPodStatus(api.NamespaceDefault, "foo")
+	if err == nil {
+		t.Errorf("Unexpected non-error after deleting")
+	}
+	if err != client.ErrPodInfoNotAvailable {
+		t.Errorf("Unexpected error: %v, expecting: %v", err, client.ErrPodInfoNotAvailable)
 	}
 }
 
-type fakeIPCache func(string) string
+func TestPodCacheGetMissing(t *testing.T) {
+	pod1 := makePod(api.NamespaceDefault, "foo", "machine", "bar")
+	config := podCacheTestConfig{
+		kubeletContainerInfo: api.PodStatus{
+			Info: api.PodInfo{"bar": api.ContainerStatus{}}},
+		nodes: []api.Node{*makeHealthyNode("machine", "1.2.3.5")},
+		pod:   pod1,
+	}
+	cache := config.Construct()
 
-func (f fakeIPCache) GetInstanceIP(host string) (ip string) {
-	return f(host)
+	status, err := cache.GetPodStatus(api.NamespaceDefault, "foo")
+	if err != nil {
+		t.Errorf("Unexpected error: %+v", err)
+	}
+	if status == nil {
+		t.Errorf("Unexpected non-status.")
+	}
 }
 
 type podCacheTestConfig struct {
-	ipFunc               func(string) string // Construct will set a default if nil
 	nodes                []api.Node
 	pods                 []api.Pod
+	pod                  *api.Pod
+	err                  error
 	kubeletContainerInfo api.PodStatus
 
 	// Construct will fill in these fields
@@ -156,11 +189,6 @@ type podCacheTestConfig struct {
 }
 
 func (c *podCacheTestConfig) Construct() *PodCache {
-	if c.ipFunc == nil {
-		c.ipFunc = func(host string) string {
-			return "ip of " + host
-		}
-	}
 	c.fakePodInfo = &FakePodInfoGetter{
 		data: api.PodStatusResult{
 			Status: c.kubeletContainerInfo,
@@ -172,8 +200,9 @@ func (c *podCacheTestConfig) Construct() *PodCache {
 		},
 	}
 	c.fakePods = registrytest.NewPodRegistry(&api.PodList{Items: c.pods})
+	c.fakePods.Pod = c.pod
+	c.fakePods.Err = c.err
 	return NewPodCache(
-		fakeIPCache(c.ipFunc),
 		c.fakePodInfo,
 		c.fakeNodes.Nodes(),
 		c.fakePods,
@@ -186,33 +215,69 @@ func makePod(namespace, name, host string, containers ...string) *api.Pod {
 		Status:     api.PodStatus{Host: host},
 	}
 	for _, c := range containers {
-		pod.Spec.Containers = append(pod.Spec.Containers, api.Container{
-			Name: c,
-		})
+		pod.Spec.Containers = append(pod.Spec.Containers, api.Container{Name: c})
 	}
 	return pod
 }
 
-func makeNode(name string) *api.Node {
+func makeHealthyNode(name string, ip string) *api.Node {
 	return &api.Node{
 		ObjectMeta: api.ObjectMeta{Name: name},
+		Status: api.NodeStatus{
+			HostIP: ip,
+			Conditions: []api.NodeCondition{
+				{Type: api.NodeReady, Status: api.ConditionFull},
+			},
+		},
+	}
+}
+
+func makeUnhealthyNode(name string) *api.Node {
+	return &api.Node{
+		ObjectMeta: api.ObjectMeta{Name: name},
+		Status: api.NodeStatus{Conditions: []api.NodeCondition{
+			{Type: api.NodeReady, Status: api.ConditionNone},
+		}},
+	}
+}
+
+func TestPodUpdateAllContainersClearsNodeStatus(t *testing.T) {
+	node := makeHealthyNode("machine", "1.2.3.5")
+	pod1 := makePod(api.NamespaceDefault, "foo", "machine", "bar")
+	pod2 := makePod(api.NamespaceDefault, "baz", "machine", "qux")
+	config := podCacheTestConfig{
+		kubeletContainerInfo: api.PodStatus{
+			Info: api.PodInfo{"bar": api.ContainerStatus{}}},
+		nodes: []api.Node{*node},
+		pods:  []api.Pod{*pod1, *pod2},
+	}
+	cache := config.Construct()
+
+	if len(cache.currentNodes) != 0 {
+		t.Errorf("unexpected node cache: %v", cache.currentNodes)
+	}
+	key := objKey{"", "machine"}
+	cache.currentNodes[key] = makeUnhealthyNode("machine").Status
+
+	cache.UpdateAllContainers()
+
+	if len(cache.currentNodes) != 1 {
+		t.Errorf("unexpected empty node cache: %v", cache.currentNodes)
+	}
+
+	if !reflect.DeepEqual(cache.currentNodes[key], node.Status) {
+		t.Errorf("unexpected status:\n%#v\nexpected:\n%#v\n", cache.currentNodes[key], node.Status)
 	}
 }
 
 func TestPodUpdateAllContainers(t *testing.T) {
-	pod := makePod(api.NamespaceDefault, "foo", "machine", "bar")
+	pod1 := makePod(api.NamespaceDefault, "foo", "machine", "bar")
 	pod2 := makePod(api.NamespaceDefault, "baz", "machine", "qux")
 	config := podCacheTestConfig{
-		ipFunc: func(host string) string {
-			if host == "machine" {
-				return "1.2.3.5"
-			}
-			return ""
-		},
 		kubeletContainerInfo: api.PodStatus{
 			Info: api.PodInfo{"bar": api.ContainerStatus{}}},
-		nodes: []api.Node{*makeNode("machine")},
-		pods:  []api.Pod{*pod, *pod2},
+		nodes: []api.Node{*makeHealthyNode("machine", "1.2.3.5")},
+		pods:  []api.Pod{*pod1, *pod2},
 	}
 	cache := config.Construct()
 
@@ -254,7 +319,7 @@ func TestFillPodStatusNoHost(t *testing.T) {
 	pod := makePod(api.NamespaceDefault, "foo", "", "bar")
 	config := podCacheTestConfig{
 		kubeletContainerInfo: api.PodStatus{},
-		nodes:                []api.Node{*makeNode("machine")},
+		nodes:                []api.Node{*makeHealthyNode("machine", "")},
 		pods:                 []api.Pod{*pod},
 	}
 	cache := config.Construct()
@@ -283,44 +348,7 @@ func TestFillPodStatusMissingMachine(t *testing.T) {
 	}
 
 	status, err := cache.GetPodStatus(pod.Namespace, pod.Name)
-	if e, a := api.PodFailed, status.Phase; e != a {
-		t.Errorf("Expected: %+v, Got %+v", e, a)
-	}
-}
-
-func TestFillPodStatus(t *testing.T) {
-	pod := makePod(api.NamespaceDefault, "foo", "machine", "bar")
-	expectedIP := "1.2.3.4"
-	expectedTime, _ := time.Parse("2013-Feb-03", "2013-Feb-03")
-	config := podCacheTestConfig{
-		kubeletContainerInfo: api.PodStatus{
-			Phase:  api.PodPending,
-			Host:   "machine",
-			HostIP: "ip of machine",
-			PodIP:  expectedIP,
-			Info: api.PodInfo{
-				"net": {
-					State: api.ContainerState{
-						Running: &api.ContainerStateRunning{
-							StartedAt: util.NewTime(expectedTime),
-						},
-					},
-					RestartCount: 1,
-					PodIP:        expectedIP,
-				},
-			},
-		},
-		nodes: []api.Node{*makeNode("machine")},
-		pods:  []api.Pod{*pod},
-	}
-	cache := config.Construct()
-	err := cache.updatePodStatus(&config.pods[0])
-	if err != nil {
-		t.Fatalf("Unexpected error: %+v", err)
-	}
-
-	status, err := cache.GetPodStatus(pod.Namespace, pod.Name)
-	if e, a := &config.kubeletContainerInfo, status; !reflect.DeepEqual(e, a) {
+	if e, a := api.PodUnknown, status.Phase; e != a {
 		t.Errorf("Expected: %+v, Got %+v", e, a)
 	}
 }
@@ -334,10 +362,10 @@ func TestFillPodInfoNoData(t *testing.T) {
 			Host:   "machine",
 			HostIP: "ip of machine",
 			Info: api.PodInfo{
-				"net": {},
+				leaky.PodInfraContainerName: {},
 			},
 		},
-		nodes: []api.Node{*makeNode("machine")},
+		nodes: []api.Node{*makeHealthyNode("machine", "ip of machine")},
 		pods:  []api.Pod{*pod},
 	}
 	cache := config.Construct()
@@ -376,6 +404,7 @@ func TestPodPhaseWithBadNode(t *testing.T) {
 
 	tests := []struct {
 		pod    *api.Pod
+		nodes  []api.Node
 		status api.PodPhase
 		test   string
 	}{
@@ -383,10 +412,11 @@ func TestPodPhaseWithBadNode(t *testing.T) {
 			&api.Pod{
 				Spec: desiredState,
 				Status: api.PodStatus{
-					Host: "machine-2",
+					Host: "machine-two",
 				},
 			},
-			api.PodFailed,
+			[]api.Node{},
+			api.PodUnknown,
 			"no info, but bad machine",
 		},
 		{
@@ -400,7 +430,8 @@ func TestPodPhaseWithBadNode(t *testing.T) {
 					Host: "machine-two",
 				},
 			},
-			api.PodFailed,
+			[]api.Node{},
+			api.PodUnknown,
 			"all running but minion is missing",
 		},
 		{
@@ -414,14 +445,45 @@ func TestPodPhaseWithBadNode(t *testing.T) {
 					Host: "machine-two",
 				},
 			},
-			api.PodFailed,
+			[]api.Node{},
+			api.PodUnknown,
 			"all stopped but minion missing",
+		},
+		{
+			&api.Pod{
+				Spec: desiredState,
+				Status: api.PodStatus{
+					Info: map[string]api.ContainerStatus{
+						"containerA": runningState,
+						"containerB": runningState,
+					},
+					Host: "machine-two",
+				},
+			},
+			[]api.Node{*makeUnhealthyNode("machine-two")},
+			api.PodUnknown,
+			"all running but minion is unhealthy",
+		},
+		{
+			&api.Pod{
+				Spec: desiredState,
+				Status: api.PodStatus{
+					Info: map[string]api.ContainerStatus{
+						"containerA": stoppedState,
+						"containerB": stoppedState,
+					},
+					Host: "machine-two",
+				},
+			},
+			[]api.Node{*makeUnhealthyNode("machine-two")},
+			api.PodUnknown,
+			"all stopped but minion is unhealthy",
 		},
 	}
 	for _, test := range tests {
 		config := podCacheTestConfig{
 			kubeletContainerInfo: test.pod.Status,
-			nodes:                []api.Node{},
+			nodes:                test.nodes,
 			pods:                 []api.Pod{*test.pod},
 		}
 		cache := config.Construct()
@@ -437,321 +499,25 @@ func TestPodPhaseWithBadNode(t *testing.T) {
 	}
 }
 
-func TestPodPhaseWithRestartAlways(t *testing.T) {
-	desiredState := api.PodSpec{
-		Containers: []api.Container{
-			{Name: "containerA"},
-			{Name: "containerB"},
-		},
-		RestartPolicy: api.RestartPolicy{Always: &api.RestartPolicyAlways{}},
+func TestGarbageCollection(t *testing.T) {
+	pod1 := makePod(api.NamespaceDefault, "foo", "machine", "bar")
+	pod2 := makePod(api.NamespaceDefault, "baz", "machine", "qux")
+	config := podCacheTestConfig{
+		pods: []api.Pod{*pod1, *pod2},
 	}
-	currentState := api.PodStatus{
-		Host: "machine",
-	}
-	runningState := api.ContainerStatus{
-		State: api.ContainerState{
-			Running: &api.ContainerStateRunning{},
-		},
-	}
-	stoppedState := api.ContainerStatus{
-		State: api.ContainerState{
-			Termination: &api.ContainerStateTerminated{},
-		},
-	}
+	cache := config.Construct()
 
-	tests := []struct {
-		pod    *api.Pod
-		status api.PodPhase
-		test   string
-	}{
-		{&api.Pod{Spec: desiredState, Status: currentState}, api.PodPending, "waiting"},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-						"containerB": runningState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"all running",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": stoppedState,
-						"containerB": stoppedState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"all stopped with restart always",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-						"containerB": stoppedState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"mixed state #1 with restart always",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodPending,
-			"mixed state #2 with restart always",
+	expected := api.PodStatus{
+		Info: api.PodInfo{
+			"extra": api.ContainerStatus{},
 		},
 	}
-	for _, test := range tests {
-		if status := getPhase(&test.pod.Spec, test.pod.Status.Info); status != test.status {
-			t.Errorf("In test %s, expected %v, got %v", test.test, test.status, status)
-		}
-	}
-}
+	cache.podStatus[objKey{api.NamespaceDefault, "extra"}] = expected
 
-func TestPodPhaseWithRestartNever(t *testing.T) {
-	desiredState := api.PodSpec{
-		Containers: []api.Container{
-			{Name: "containerA"},
-			{Name: "containerB"},
-		},
-		RestartPolicy: api.RestartPolicy{Never: &api.RestartPolicyNever{}},
-	}
-	currentState := api.PodStatus{
-		Host: "machine",
-	}
-	runningState := api.ContainerStatus{
-		State: api.ContainerState{
-			Running: &api.ContainerStateRunning{},
-		},
-	}
-	succeededState := api.ContainerStatus{
-		State: api.ContainerState{
-			Termination: &api.ContainerStateTerminated{
-				ExitCode: 0,
-			},
-		},
-	}
-	failedState := api.ContainerStatus{
-		State: api.ContainerState{
-			Termination: &api.ContainerStateTerminated{
-				ExitCode: -1,
-			},
-		},
-	}
+	cache.GarbageCollectPodStatus()
 
-	tests := []struct {
-		pod    *api.Pod
-		status api.PodPhase
-		test   string
-	}{
-		{&api.Pod{Spec: desiredState, Status: currentState}, api.PodPending, "waiting"},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-						"containerB": runningState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"all running with restart never",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": succeededState,
-						"containerB": succeededState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodSucceeded,
-			"all succeeded with restart never",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": failedState,
-						"containerB": failedState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodFailed,
-			"all failed with restart never",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-						"containerB": succeededState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"mixed state #1 with restart never",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodPending,
-			"mixed state #2 with restart never",
-		},
-	}
-	for _, test := range tests {
-		if status := getPhase(&test.pod.Spec, test.pod.Status.Info); status != test.status {
-			t.Errorf("In test %s, expected %v, got %v", test.test, test.status, status)
-		}
-	}
-}
-
-func TestPodPhaseWithRestartOnFailure(t *testing.T) {
-	desiredState := api.PodSpec{
-		Containers: []api.Container{
-			{Name: "containerA"},
-			{Name: "containerB"},
-		},
-		RestartPolicy: api.RestartPolicy{OnFailure: &api.RestartPolicyOnFailure{}},
-	}
-	currentState := api.PodStatus{
-		Host: "machine",
-	}
-	runningState := api.ContainerStatus{
-		State: api.ContainerState{
-			Running: &api.ContainerStateRunning{},
-		},
-	}
-	succeededState := api.ContainerStatus{
-		State: api.ContainerState{
-			Termination: &api.ContainerStateTerminated{
-				ExitCode: 0,
-			},
-		},
-	}
-	failedState := api.ContainerStatus{
-		State: api.ContainerState{
-			Termination: &api.ContainerStateTerminated{
-				ExitCode: -1,
-			},
-		},
-	}
-
-	tests := []struct {
-		pod    *api.Pod
-		status api.PodPhase
-		test   string
-	}{
-		{&api.Pod{Spec: desiredState, Status: currentState}, api.PodPending, "waiting"},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-						"containerB": runningState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"all running with restart onfailure",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": succeededState,
-						"containerB": succeededState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodSucceeded,
-			"all succeeded with restart onfailure",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": failedState,
-						"containerB": failedState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"all failed with restart never",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-						"containerB": succeededState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodRunning,
-			"mixed state #1 with restart onfailure",
-		},
-		{
-			&api.Pod{
-				Spec: desiredState,
-				Status: api.PodStatus{
-					Info: map[string]api.ContainerStatus{
-						"containerA": runningState,
-					},
-					Host: "machine",
-				},
-			},
-			api.PodPending,
-			"mixed state #2 with restart onfailure",
-		},
-	}
-	for _, test := range tests {
-		if status := getPhase(&test.pod.Spec, test.pod.Status.Info); status != test.status {
-			t.Errorf("In test %s, expected %v, got %v", test.test, test.status, status)
-		}
+	status, found := cache.podStatus[objKey{api.NamespaceDefault, "extra"}]
+	if found {
+		t.Errorf("unexpectedly found: %v for key %v", status, objKey{api.NamespaceDefault, "extra"})
 	}
 }

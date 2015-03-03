@@ -47,7 +47,7 @@ func ExampleManifestAndPod(id string) (v1beta1.ContainerManifest, api.BoundPod) 
 			{
 				Name: "host-dir",
 				Source: v1beta1.VolumeSource{
-					HostDir: &v1beta1.HostPath{"/dir/path"},
+					HostDir: &v1beta1.HostPathVolumeSource{"/dir/path"},
 				},
 			},
 		},
@@ -62,14 +62,13 @@ func ExampleManifestAndPod(id string) (v1beta1.ContainerManifest, api.BoundPod) 
 				{
 					Name:  "c" + id,
 					Image: "foo",
-					TerminationMessagePath: "/somepath",
 				},
 			},
 			Volumes: []api.Volume{
 				{
 					Name: "host-dir",
 					Source: api.VolumeSource{
-						HostPath: &api.HostPath{"/dir/path"},
+						HostPath: &api.HostPathVolumeSource{"/dir/path"},
 					},
 				},
 			},
@@ -94,11 +93,11 @@ func TestUpdateOnNonExistentFile(t *testing.T) {
 	case got := <-ch:
 		update := got.(kubelet.PodUpdate)
 		expected := CreatePodUpdate(kubelet.SET, kubelet.FileSource)
-		if !api.Semantic.DeepEqual(expected, update) {
+		if !api.Semantic.DeepDerivative(expected, update) {
 			t.Fatalf("Expected %#v, Got %#v", expected, update)
 		}
 
-	case <-time.After(2 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Errorf("Expected update, timeout instead")
 	}
 }
@@ -137,15 +136,7 @@ func TestReadFromFile(t *testing.T) {
 				Namespace: "",
 				SelfLink:  "",
 			},
-			Spec: api.PodSpec{
-				Containers: []api.Container{
-					{
-						Image: "test/image",
-						TerminationMessagePath: "/dev/termination-log",
-						ImagePullPolicy:        api.PullAlways,
-					},
-				},
-			},
+			Spec: api.PodSpec{Containers: []api.Container{{Image: "test/image"}}},
 		})
 
 		// There's no way to provide namespace in ContainerManifest, so
@@ -161,11 +152,11 @@ func TestReadFromFile(t *testing.T) {
 		}
 		update.Pods[0].ObjectMeta.SelfLink = ""
 
-		if !api.Semantic.DeepEqual(expected, update) {
+		if !api.Semantic.DeepDerivative(expected, update) {
 			t.Fatalf("Expected %#v, Got %#v", expected, update)
 		}
 
-	case <-time.After(2 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Errorf("Expected update, timeout instead")
 	}
 }
@@ -191,15 +182,7 @@ func TestReadFromFileWithoutID(t *testing.T) {
 				Namespace: "",
 				SelfLink:  "",
 			},
-			Spec: api.PodSpec{
-				Containers: []api.Container{
-					{
-						Image: "test/image",
-						TerminationMessagePath: "/dev/termination-log",
-						ImagePullPolicy:        api.PullAlways,
-					},
-				},
-			},
+			Spec: api.PodSpec{Containers: []api.Container{{Image: "test/image"}}},
 		})
 
 		if len(update.Pods[0].ObjectMeta.Name) == 0 {
@@ -209,11 +192,11 @@ func TestReadFromFileWithoutID(t *testing.T) {
 		update.Pods[0].ObjectMeta.Namespace = ""
 		update.Pods[0].ObjectMeta.SelfLink = ""
 
-		if !api.Semantic.DeepEqual(expected, update) {
+		if !api.Semantic.DeepDerivative(expected, update) {
 			t.Fatalf("Expected %#v, Got %#v", expected, update)
 		}
 
-	case <-time.After(2 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Errorf("Expected update, timeout instead")
 	}
 }
@@ -240,25 +223,17 @@ func TestReadV1Beta2FromFile(t *testing.T) {
 				Namespace: "",
 				SelfLink:  "",
 			},
-			Spec: api.PodSpec{
-				Containers: []api.Container{
-					{
-						Image: "test/image",
-						TerminationMessagePath: "/dev/termination-log",
-						ImagePullPolicy:        api.PullAlways,
-					},
-				},
-			},
+			Spec: api.PodSpec{Containers: []api.Container{{Image: "test/image"}}},
 		})
 
 		update.Pods[0].ObjectMeta.Namespace = ""
 		update.Pods[0].ObjectMeta.SelfLink = ""
 
-		if !api.Semantic.DeepEqual(expected, update) {
+		if !api.Semantic.DeepDerivative(expected, update) {
 			t.Fatalf("Expected %#v, Got %#v", expected, update)
 		}
 
-	case <-time.After(2 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Errorf("Expected update, timeout instead")
 	}
 }
@@ -281,7 +256,7 @@ func TestReadFromFileWithDefaults(t *testing.T) {
 			t.Errorf("Unexpected UID: %s", update.Pods[0].ObjectMeta.UID)
 		}
 
-	case <-time.After(2 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Errorf("Expected update, timeout instead")
 	}
 }
@@ -315,7 +290,7 @@ func TestExtractFromEmptyDir(t *testing.T) {
 
 	update := (<-ch).(kubelet.PodUpdate)
 	expected := CreatePodUpdate(kubelet.SET, kubelet.FileSource)
-	if !api.Semantic.DeepEqual(expected, update) {
+	if !api.Semantic.DeepDerivative(expected, update) {
 		t.Errorf("Expected %#v, Got %#v", expected, update)
 	}
 }
@@ -371,7 +346,7 @@ func TestExtractFromDir(t *testing.T) {
 	}
 	sort.Sort(sortedPods(update.Pods))
 	sort.Sort(sortedPods(expected.Pods))
-	if !api.Semantic.DeepEqual(expected, update) {
+	if !api.Semantic.DeepDerivative(expected, update) {
 		t.Fatalf("Expected %#v, Got %#v", expected, update)
 	}
 	for i := range update.Pods {

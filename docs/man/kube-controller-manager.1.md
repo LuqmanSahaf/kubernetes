@@ -36,7 +36,7 @@ The kube-controller-manager has several options.
 	The provider for cloud services. Empty string for no provider.
 
 **--minion_regexp**=""
-	If non empty, and -cloud_provider is specified, a regular expression for matching minion VMs.
+	If non empty, and --cloud_provider is specified, a regular expression for matching minion VMs.
 
 **--insecure_skip_tls_verify**=false
 	If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
@@ -54,13 +54,25 @@ The kube-controller-manager has several options.
 	log to standard error instead of files.
 
 **--machines**=[]
-        List of machines to schedule onto, comma separated.
+    List of machines to schedule onto, comma separated.
+
+**--pod_eviction_timeout**=5m
+    The grace peroid for deleting pods on failed nodes.
+
+**--sync_nodes**=true
+    If true, and --cloud_provider is specified, sync nodes from the cloud provider. Default true.
 
 **--master**=""
 	The address of the Kubernetes API server.
 
+**--node_sync_period**=10s
+    The period for syncing nodes from cloudprovider.
+
 **--port**=10252
-	The port that the controller-manager's http service runs on.
+    The port that the controller-manager's http service runs on.
+
+**--resource_quota_sync_period**=10s
+    The period for syncing quota usage status in the system.
 
 **--stderrthreshold**=0
 	logs at or above this threshold go to stderr.

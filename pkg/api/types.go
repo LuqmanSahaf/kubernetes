@@ -74,13 +74,26 @@ type ListMeta struct {
 }
 
 // ObjectMeta is metadata that all persisted resources must have, which includes all objects
-// users must create. A resource may have only one of {ObjectMeta, ListMeta}.
+// users must create.
 type ObjectMeta struct {
 	// Name is unique within a namespace.  Name is required when creating resources, although
 	// some resources may allow a client to request the generation of an appropriate name
 	// automatically. Name is primarily intended for creation idempotence and configuration
 	// definition.
 	Name string `json:"name,omitempty"`
+
+	// GenerateName indicates that the name should be made unique by the server prior to persisting
+	// it. A non-empty value for the field indicates the name will be made unique (and the name
+	// returned to the client will be different than the name passed). The value of this field will
+	// be combined with a unique suffix on the server if the Name field has not been provided.
+	// The provided value must be valid within the rules for Name, and may be truncated by the length
+	// of the suffix required to make the value unique on the server.
+	//
+	// If this field is specified, and Name is not present, the server will NOT return a 409 if the
+	// generated name exists - instead, it will either return 201 Created or 500 with Reason
+	// ServerTimeout indicating a unique name could not be found in the time allotted, and the client
+	// should retry (optionally after the time indicated in the Retry-After header).
+	GenerateName string `json:"generateName,omitempty"`
 
 	// Namespace defines the space within which name must be unique. An empty namespace is
 	// equivalent to the "default" namespace, but "default" is the canonical representation.
@@ -157,22 +170,24 @@ type VolumeSource struct {
 	// machine. Most containers will NOT need this.
 	// TODO(jonesdl) We need to restrict who can use host directory mounts and who can/can not
 	// mount host directories as read/write.
-	HostPath *HostPath `json:"hostPath"`
+	HostPath *HostPathVolumeSource `json:"hostPath"`
 	// EmptyDir represents a temporary directory that shares a pod's lifetime.
-	EmptyDir *EmptyDir `json:"emptyDir"`
+	EmptyDir *EmptyDirVolumeSource `json:"emptyDir"`
 	// GCEPersistentDisk represents a GCE Disk resource that is attached to a
 	// kubelet's host machine and then exposed to the pod.
-	GCEPersistentDisk *GCEPersistentDisk `json:"persistentDisk"`
+	GCEPersistentDisk *GCEPersistentDiskVolumeSource `json:"persistentDisk"`
 	// GitRepo represents a git repository at a particular revision.
-	GitRepo *GitRepo `json:"gitRepo"`
+	GitRepo *GitRepoVolumeSource `json:"gitRepo"`
+	// Secret represents a secret that should populate this volume.
+	Secret *SecretVolumeSource `json:"secret"`
 }
 
-// HostPath represents bare host directory volume.
-type HostPath struct {
+// HostPathVolumeSource represents bare host directory volume.
+type HostPathVolumeSource struct {
 	Path string `json:"path"`
 }
 
-type EmptyDir struct{}
+type EmptyDirVolumeSource struct{}
 
 // Protocol defines network protocols supported for things like conatiner ports.
 type Protocol string
@@ -184,12 +199,12 @@ const (
 	ProtocolUDP Protocol = "UDP"
 )
 
-// GCEPersistentDisk represents a Persistent Disk resource in Google Compute Engine.
+// GCEPersistentDiskVolumeSource represents a Persistent Disk resource in Google Compute Engine.
 //
 // A GCE PD must exist and be formatted before mounting to a container.
 // The disk must also be in the same GCE project and zone as the kubelet.
 // A GCE PD can only be mounted as read/write once.
-type GCEPersistentDisk struct {
+type GCEPersistentDiskVolumeSource struct {
 	// Unique name of the PD resource. Used to identify the disk in GCE
 	PDName string `json:"pdName"`
 	// Required: Filesystem type to mount.
@@ -206,8 +221,8 @@ type GCEPersistentDisk struct {
 	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
-// GitRepo represents a volume that is pulled from git when the pod is created.
-type GitRepo struct {
+// GitRepoVolumeSource represents a volume that is pulled from git when the pod is created.
+type GitRepoVolumeSource struct {
 	// Repository URL
 	Repository string `json:"repository"`
 	// Commit hash, this is optional
@@ -215,8 +230,17 @@ type GitRepo struct {
 	// TODO: Consider credentials here.
 }
 
-// Port represents a network port in a single container
-type Port struct {
+// SecretVolumeSource adapts a Secret into a VolumeSource.
+//
+// The contents of the target Secret's Data field will be presented in a volume
+// as files using the keys in the Data field as the file names.
+type SecretVolumeSource struct {
+	// Reference to a Secret
+	Target ObjectReference `json:"target"`
+}
+
+// ContainerPort represents a network port in a single container
+type ContainerPort struct {
 	// Optional: If specified, this must be a DNS_LABEL.  Each named port
 	// in a pod must have a unique name.
 	Name string `json:"name,omitempty"`
@@ -224,7 +248,7 @@ type Port struct {
 	HostPort int `json:"hostPort,omitempty"`
 	// Required: This must be a valid port number, 0 < x < 65536.
 	ContainerPort int `json:"containerPort"`
-	// Optional: Supports "TCP" and "UDP".  Defaults to "TCP".
+	// Required: Supports "TCP" and "UDP".
 	Protocol Protocol `json:"protocol,omitempty"`
 	// Optional: What host IP to bind the external port to.
 	HostIP string `json:"hostIP,omitempty"`
@@ -273,17 +297,14 @@ type ExecAction struct {
 	Command []string `json:"command,omitempty"`
 }
 
-// LivenessProbe describes a liveness probe to be examined to the container.
-// TODO: pass structured data to the actions, and document that data here.
-type LivenessProbe struct {
-	// HTTPGetProbe parameters, required if Type == 'http'
-	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
-	// TCPSocketProbe parameter, required if Type == 'tcp'
-	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty"`
-	// ExecProbe parameter, required if Type == 'exec'
-	Exec *ExecAction `json:"exec,omitempty"`
+// Probe describes a liveness probe to be examined to the container.
+type Probe struct {
+	// The action taken to determine the health of a container
+	Handler `json:",inline"`
 	// Length of time before health checking is activated.  In seconds.
 	InitialDelaySeconds int64 `json:"initialDelaySeconds,omitempty"`
+	// Length of time before health checking times out.  In seconds.
+	TimeoutSeconds int64 `json:"timeoutSeconds,omitempty"`
 }
 
 // PullPolicy describes a policy for if/when to pull a container image
@@ -298,6 +319,23 @@ const (
 	PullIfNotPresent PullPolicy = "IfNotPresent"
 )
 
+// CapabilityType represent POSIX capabilities type
+type CapabilityType string
+
+// Capabilities represent POSIX capabilities that can be added or removed to a running container.
+type Capabilities struct {
+	// Added capabilities
+	Add []CapabilityType `json:"add,omitempty"`
+	// Removed capabilities
+	Drop []CapabilityType `json:"drop,omitempty"`
+}
+
+// ResourceRequirements describes the compute resource requirements.
+type ResourceRequirements struct {
+	// Limits describes the maximum amount of compute resources required.
+	Limits ResourceList `json:"limits,omitempty"`
+}
+
 // Container represents a single container that is expected to be run on the host.
 type Container struct {
 	// Required: This must be a DNS_LABEL.  Each container in a pod must
@@ -308,22 +346,23 @@ type Container struct {
 	// Optional: Defaults to whatever is defined in the image.
 	Command []string `json:"command,omitempty"`
 	// Optional: Defaults to Docker's default.
-	WorkingDir string   `json:"workingDir,omitempty"`
-	Ports      []Port   `json:"ports,omitempty"`
-	Env        []EnvVar `json:"env,omitempty"`
-	// Optional: Defaults to unlimited.
-	Memory resource.Quantity `json:"memory,omitempty"`
-	// Optional: Defaults to unlimited.
-	CPU           resource.Quantity `json:"cpu,omitempty"`
-	VolumeMounts  []VolumeMount     `json:"volumeMounts,omitempty"`
-	LivenessProbe *LivenessProbe    `json:"livenessProbe,omitempty"`
-	Lifecycle     *Lifecycle        `json:"lifecycle,omitempty"`
-	// Optional: Defaults to /dev/termination-log
+	WorkingDir string          `json:"workingDir,omitempty"`
+	Ports      []ContainerPort `json:"ports,omitempty"`
+	Env        []EnvVar        `json:"env,omitempty"`
+	// Compute resource requirements.
+	Resources      ResourceRequirements `json:"resources,omitempty"`
+	VolumeMounts   []VolumeMount        `json:"volumeMounts,omitempty"`
+	LivenessProbe  *Probe               `json:"livenessProbe,omitempty"`
+	ReadinessProbe *Probe               `json:"readinessProbe,omitempty"`
+	Lifecycle      *Lifecycle           `json:"lifecycle,omitempty"`
+	// Required.
 	TerminationMessagePath string `json:"terminationMessagePath,omitempty"`
 	// Optional: Default to false.
 	Privileged bool `json:"privileged,omitempty"`
-	// Optional: Policy for pulling images for this container
+	// Required: Policy for pulling images for this container
 	ImagePullPolicy PullPolicy `json:"imagePullPolicy"`
+	// Optional: Capabilities for container.
+	Capabilities Capabilities `json:"capabilities,omitempty"`
 }
 
 // Handler defines a specific action that should be taken
@@ -334,6 +373,9 @@ type Handler struct {
 	Exec *ExecAction `json:"exec,omitempty"`
 	// HTTPGet specifies the http request to perform.
 	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
+	// TCPSocket specifies an action involving a TCP port.
+	// TODO: implement a realistic TCP lifecycle hook
+	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty"`
 }
 
 // Lifecycle describes actions that the management system should take in response to container lifecycle
@@ -350,27 +392,16 @@ type Lifecycle struct {
 
 // The below types are used by kube_client and api_server.
 
-// PodPhase is a label for the condition of a pod at the current time.
-type PodPhase string
+type ConditionStatus string
 
-// These are the valid statuses of pods.
+// These are valid condition statuses. "ConditionFull" means a resource is in the condition;
+// "ConditionNone" means a resource is not in the condition; "ConditionUnknown" means kubernetes
+// can't decide if a resource is in the condition or not. In the future, we could add other
+// intermediate conditions, e.g. ConditionDegraded.
 const (
-	// PodPending means the pod has been accepted by the system, but one or more of the containers
-	// has not been started. This includes time before being bound to a node, as well as time spent
-	// pulling images onto the host.
-	PodPending PodPhase = "Pending"
-	// PodRunning means the pod has been bound to a node and all of the containers have been started.
-	// At least one container is still running or is in the process of being restarted.
-	PodRunning PodPhase = "Running"
-	// PodSucceeded means that all containers in the pod have voluntarily terminated
-	// with a container exit code of 0, and the system is not going to restart any of these containers.
-	PodSucceeded PodPhase = "Succeeded"
-	// PodFailed means that all containers in the pod have terminated, and at least one container has
-	// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
-	PodFailed PodPhase = "Failed"
-	// PodUnknown means that for some reason the state of the pod could not be obtained, typically due
-	// to an error in communicating with the host of the pod.
-	PodUnknown PodPhase = "Unknown"
+	ConditionFull    ConditionStatus = "Full"
+	ConditionNone    ConditionStatus = "None"
+	ConditionUnknown ConditionStatus = "Unknown"
 )
 
 type ContainerStateWaiting struct {
@@ -404,6 +435,8 @@ type ContainerStatus struct {
 	// TODO(dchen1107): Should we rename PodStatus to a more generic name or have a separate states
 	// defined for container?
 	State ContainerState `json:"state,omitempty"`
+	// Ready specifies whether the conatiner has passed its readiness check.
+	Ready bool `json:"ready"`
 	// Note that this is calculated from dead containers.  But those containers are subject to
 	// garbage collection.  This value will get capped at 5 by GC.
 	RestartCount int `json:"restartCount"`
@@ -412,7 +445,46 @@ type ContainerStatus struct {
 	PodIP string `json:"podIP,omitempty"`
 	// TODO(dchen1107): Need to decide how to represent this in v1beta3
 	Image       string `json:"image"`
+	ImageID     string `json:"imageID" description:"ID of the container's image"`
 	ContainerID string `json:"containerID,omitempty" description:"container's ID in the format 'docker://<container_id>'"`
+}
+
+// PodPhase is a label for the condition of a pod at the current time.
+type PodPhase string
+
+// These are the valid statuses of pods.
+const (
+	// PodPending means the pod has been accepted by the system, but one or more of the containers
+	// has not been started. This includes time before being bound to a node, as well as time spent
+	// pulling images onto the host.
+	PodPending PodPhase = "Pending"
+	// PodRunning means the pod has been bound to a node and all of the containers have been started.
+	// At least one container is still running or is in the process of being restarted.
+	PodRunning PodPhase = "Running"
+	// PodSucceeded means that all containers in the pod have voluntarily terminated
+	// with a container exit code of 0, and the system is not going to restart any of these containers.
+	PodSucceeded PodPhase = "Succeeded"
+	// PodFailed means that all containers in the pod have terminated, and at least one container has
+	// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
+	PodFailed PodPhase = "Failed"
+	// PodUnknown means that for some reason the state of the pod could not be obtained, typically due
+	// to an error in communicating with the host of the pod.
+	PodUnknown PodPhase = "Unknown"
+)
+
+type PodConditionType string
+
+// These are valid conditions of pod.
+const (
+	// PodReady means the pod is able to service requests and should be added to the
+	// load balancing pools of all matching services.
+	PodReady PodConditionType = "Ready"
+)
+
+// TODO: add LastTransitionTime, Reason, Message to match NodeCondition api.
+type PodCondition struct {
+	Type   PodConditionType `json:"type"`
+	Status ConditionStatus  `json:"status"`
 }
 
 // PodInfo contains one entry for every container with available info.
@@ -471,7 +543,7 @@ type PodSpec struct {
 	Volumes       []Volume      `json:"volumes"`
 	Containers    []Container   `json:"containers"`
 	RestartPolicy RestartPolicy `json:"restartPolicy,omitempty"`
-	// Optional: Set DNS policy.  Defaults to "ClusterFirst"
+	// Required: Set DNS policy.
 	DNSPolicy DNSPolicy `json:"dnsPolicy,omitempty"`
 	// NodeSelector is a selector which must be true for the pod to fit on a node
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
@@ -485,8 +557,8 @@ type PodSpec struct {
 // PodStatus represents information about the status of a pod. Status may trail the actual
 // state of a system.
 type PodStatus struct {
-	Phase PodPhase `json:"phase,omitempty"`
-
+	Phase      PodPhase       `json:"phase,omitempty"`
+	Conditions []PodCondition `json:"Condition,omitempty"`
 	// A human readable message indicating details about why the pod is in this state.
 	Message string `json:"message,omitempty"`
 
@@ -631,7 +703,7 @@ type ServiceSpec struct {
 	// proxied by this service.
 	Port int `json:"port"`
 
-	// Optional: Supports "TCP" and "UDP".  Defaults to "TCP".
+	// Required: Supports "TCP" and "UDP".
 	Protocol Protocol `json:"protocol,omitempty"`
 
 	// This service will route traffic to pods having labels matching this selector. If empty or not present,
@@ -644,20 +716,17 @@ type ServiceSpec struct {
 	// not be changed by updates.
 	PortalIP string `json:"portalIP,omitempty"`
 
-	// ProxyPort is assigned by the master.  If 0, the proxy will choose an ephemeral port.
-	// TODO: This is awkward - if we had a BoundService, it would be better factored.
-	ProxyPort int `json:"proxyPort,omitempty"`
-
 	// CreateExternalLoadBalancer indicates whether a load balancer should be created for this service.
 	CreateExternalLoadBalancer bool `json:"createExternalLoadBalancer,omitempty"`
 	// PublicIPs are used by external load balancers.
 	PublicIPs []string `json:"publicIPs,omitempty"`
 
-	// ContainerPort is the name of the port on the container to direct traffic to.
-	// Optional, if unspecified use the first port on the container.
+	// ContainerPort is the name or number of the port on the container to direct traffic to.
+	// This is useful if the containers the service points to have multiple open ports.
+	// Optional: If unspecified, the first port on the container will be used.
 	ContainerPort util.IntOrString `json:"containerPort,omitempty"`
 
-	// Optional: Supports "ClientIP" and "None".  Used to maintain session affinity.
+	// Required: Supports "ClientIP" and "None".  Used to maintain session affinity.
 	SessionAffinity AffinityType `json:"sessionAffinity,omitempty"`
 }
 
@@ -676,12 +745,25 @@ type Service struct {
 }
 
 // Endpoints is a collection of endpoints that implement the actual service, for example:
-// Name: "mysql", Endpoints: ["10.10.1.1:1909", "10.10.2.2:8834"]
+// Name: "mysql", Endpoints: [{"ip": "10.10.1.1", "port": 1909}, {"ip": "10.10.2.2", "port": 8834}]
 type Endpoints struct {
 	TypeMeta   `json:",inline"`
 	ObjectMeta `json:"metadata,omitempty"`
 
-	Endpoints []string `json:"endpoints,omitempty"`
+	// Optional: The IP protocol for these endpoints. Supports "TCP" and
+	// "UDP".  Defaults to "TCP".
+	Protocol  Protocol   `json:"protocol,omitempty"`
+	Endpoints []Endpoint `json:"endpoints,omitempty"`
+}
+
+// Endpoint is a single IP endpoint of a service.
+type Endpoint struct {
+	// Required: The IP of this endpoint.
+	// TODO: This should allow hostname or IP, see #4447.
+	IP string `json:"ip"`
+
+	// Required: The destination port to access.
+	Port int `json:"port"`
 }
 
 // EndpointsList is a list of endpoints.
@@ -696,6 +778,11 @@ type EndpointsList struct {
 type NodeSpec struct {
 	// Capacity represents the available resources of a node
 	Capacity ResourceList `json:"capacity,omitempty"`
+	// PodCIDR represents the pod IP range assigned to the node
+	// Note: assigning IP ranges to nodes might need to be revisited when we support migratable IPs.
+	PodCIDR string `json:"cidr,omitempty"`
+	// External ID of the node assigned by some machine database (e.g. a cloud provider)
+	ExternalID string `json:"externalID,omitempty"`
 }
 
 // NodeStatus is information about the current status of a node.
@@ -720,36 +807,25 @@ const (
 	NodeTerminated NodePhase = "Terminated"
 )
 
-type NodeConditionKind string
+type NodeConditionType string
 
 // These are valid conditions of node. Currently, we don't have enough information to decide
 // node condition. In the future, we will add more. The proposed set of conditions are:
 // NodeReachable, NodeLive, NodeReady, NodeSchedulable, NodeRunnable.
 const (
 	// NodeReachable means the node can be reached (in the sense of HTTP connection) from node controller.
-	NodeReachable NodeConditionKind = "Reachable"
+	NodeReachable NodeConditionType = "Reachable"
 	// NodeReady means the node returns StatusOK for HTTP health check.
-	NodeReady NodeConditionKind = "Ready"
-)
-
-type NodeConditionStatus string
-
-// These are valid condition status. "ConditionFull" means node is in the condition;
-// "ConditionNone" means node is not in the condition; "ConditionUnknown" means kubernetes
-// can't decide if node is in the condition or not. In the future, we could add other
-// intermediate conditions, e.g. ConditionDegraded.
-const (
-	ConditionFull    NodeConditionStatus = "Full"
-	ConditionNone    NodeConditionStatus = "None"
-	ConditionUnknown NodeConditionStatus = "Unknown"
+	NodeReady NodeConditionType = "Ready"
 )
 
 type NodeCondition struct {
-	Kind               NodeConditionKind   `json:"kind"`
-	Status             NodeConditionStatus `json:"status"`
-	LastTransitionTime util.Time           `json:"lastTransitionTime,omitempty"`
-	Reason             string              `json:"reason,omitempty"`
-	Message            string              `json:"message,omitempty"`
+	Type               NodeConditionType `json:"type"`
+	Status             ConditionStatus   `json:"status"`
+	LastProbeTime      util.Time         `json:"lastProbeTime,omitempty"`
+	LastTransitionTime util.Time         `json:"lastTransitionTime,omitempty"`
+	Reason             string            `json:"reason,omitempty"`
+	Message            string            `json:"message,omitempty"`
 }
 
 // NodeResources is an object for conveying resource information about a node.
@@ -773,18 +849,7 @@ const (
 // ResourceList is a set of (resource name, quantity) pairs.
 type ResourceList map[ResourceName]resource.Quantity
 
-// Get is a convenience function, which returns a 0 quantity if the
-// resource list is nil, empty, or lacks a value for the requested resource.
-// Treat as read only!
-func (rl ResourceList) Get(name ResourceName) *resource.Quantity {
-	if rl == nil {
-		return &resource.Quantity{}
-	}
-	q := rl[name]
-	return &q
-}
-
-// Node is a worker node in Kubernetenes
+// Node is a worker node in Kubernetes
 // The name of the node according to etcd is in ObjectMeta.Name.
 type Node struct {
 	TypeMeta   `json:",inline"`
@@ -805,6 +870,35 @@ type NodeList struct {
 	Items []Node `json:"items"`
 }
 
+// NamespaceSpec describes the attributes on a Namespace
+type NamespaceSpec struct {
+}
+
+// NamespaceStatus is information about the current status of a Namespace.
+type NamespaceStatus struct {
+}
+
+// A namespace provides a scope for Names.
+// Use of multiple namespaces is optional
+type Namespace struct {
+	TypeMeta   `json:",inline"`
+	ObjectMeta `json:"metadata,omitempty"`
+
+	// Spec defines the behavior of the Namespace.
+	Spec NamespaceSpec `json:"spec,omitempty"`
+
+	// Status describes the current status of a Namespace
+	Status NamespaceStatus `json:"status,omitempty"`
+}
+
+// NamespaceList is a list of Namespaces.
+type NamespaceList struct {
+	TypeMeta `json:",inline"`
+	ListMeta `json:"metadata,omitempty"`
+
+	Items []Namespace `json:"items"`
+}
+
 // Binding is written by a scheduler to cause a pod to be bound to a host.
 type Binding struct {
 	TypeMeta   `json:",inline"`
@@ -821,12 +915,12 @@ type Status struct {
 	TypeMeta `json:",inline"`
 	ListMeta `json:"metadata,omitempty"`
 
-	// One of: "Success", "Failure", "Working" (for operations not yet completed)
+	// One of: "Success" or "Failure"
 	Status string `json:"status,omitempty"`
 	// A human-readable description of the status of this operation.
 	Message string `json:"message,omitempty"`
 	// A machine-readable description of why this operation is in the
-	// "Failure" or "Working" status. If this value is empty there
+	// "Failure" status. If this value is empty there
 	// is no information available. A Reason clarifies an HTTP status
 	// code but does not override it.
 	Reason StatusReason `json:"reason,omitempty"`
@@ -862,7 +956,6 @@ type StatusDetails struct {
 const (
 	StatusSuccess = "Success"
 	StatusFailure = "Failure"
-	StatusWorking = "Working"
 )
 
 // StatusReason is an enumeration of possible failure causes.  Each StatusReason
@@ -876,18 +969,6 @@ const (
 	// The details field may contain other information about this error.
 	// Status code 500.
 	StatusReasonUnknown StatusReason = ""
-
-	// StatusReasonWorking means the server is processing this request and will complete
-	// at a future time.
-	// Details (optional):
-	//   "kind" string - the name of the resource being referenced ("operation" today)
-	//   "id"   string - the identifier of the Operation resource where updates
-	//                   will be returned
-	// Headers (optional):
-	//   "Location" - HTTP header populated with a URL that can retrieved the final
-	//                status of this operation.
-	// Status code 202
-	StatusReasonWorking StatusReason = "Working"
 
 	// StatusReasonForbidden means the server can be reached and understood the request, but refuses
 	// to take any further action.  It is the result of the server being configured to deny access for some reason
@@ -937,6 +1018,23 @@ const (
 	// Status code 422
 	StatusReasonInvalid StatusReason = "Invalid"
 
+	// StatusReasonServerTimeout means the server can be reached and understood the request,
+	// but cannot complete the action in a reasonable time. The client should retry the request.
+	// This is may be due to temporary server load or a transient communication issue with
+	// another server. Status code 500 is used because the HTTP spec provides no suitable
+	// server-requested client retry and the 5xx class represents actionable errors.
+	// Details (optional):
+	//   "kind" string - the kind attribute of the resource being acted on.
+	//   "id"   string - the operation that is being attempted.
+	// Status code 500
+	StatusReasonServerTimeout StatusReason = "ServerTimeout"
+
+	// StatusReasonTimeout means that the request could not be completed within the given time.
+	// Clients can get this response only when they specified a timeout param in the request.
+	// The request might succeed with an increased value of timeout param.
+	// Status code 504
+	StatusReasonTimeout StatusReason = "Timeout"
+
 	// StatusReasonBadRequest means that the request itself was invalid, because the request
 	// doesn't make any sense, for example deleting a read-only object.  This is different than
 	// StatusReasonInvalid above which indicates that the API call could possibly succeed, but the
@@ -979,7 +1077,7 @@ type StatusCause struct {
 
 // CauseType is a machine readable value providing more detail about what
 // occured in a status response. An operation may have multiple causes for a
-// status (whether Failure, Success, or Working).
+// status (whether Failure or Success).
 type CauseType string
 
 const (
@@ -999,20 +1097,6 @@ const (
 	// values that can not be handled (e.g. an enumerated string).
 	CauseTypeFieldValueNotSupported CauseType = "FieldValueNotSupported"
 )
-
-// Operation is an operation delivered to API clients.
-type Operation struct {
-	TypeMeta   `json:",inline"`
-	ObjectMeta `json:"metadata,omitempty"`
-}
-
-// OperationList is a list of operations, as delivered to API clients.
-type OperationList struct {
-	TypeMeta `json:",inline"`
-	ListMeta `json:"metadata,omitempty"`
-
-	Items []Operation `json:"items"`
-}
 
 // ObjectReference contains enough information to let you inspect or modify the referred object.
 type ObjectReference struct {
@@ -1063,8 +1147,14 @@ type Event struct {
 	// Optional. The component reporting this event. Should be a short machine understandable string.
 	Source EventSource `json:"source,omitempty"`
 
-	// The time at which the client recorded the event. (Time of server receipt is in TypeMeta.)
-	Timestamp util.Time `json:"timestamp,omitempty"`
+	// The time at which the event was first recorded. (Time of server receipt is in TypeMeta.)
+	FirstTimestamp util.Time `json:"firstTimestamp,omitempty"`
+
+	// The time at which the most recent occurance of this event was recorded.
+	LastTimestamp util.Time `json:"lastTimestamp,omitempty"`
+
+	// The number of times this event has occurred.
+	Count int `json:"count,omitempty"`
 }
 
 // EventList is a list of events.
@@ -1092,7 +1182,7 @@ type ContainerManifest struct {
 	Volumes       []Volume      `json:"volumes"`
 	Containers    []Container   `json:"containers"`
 	RestartPolicy RestartPolicy `json:"restartPolicy,omitempty"`
-	// Optional: Set DNS policy.  Defaults to "ClusterFirst"
+	// Required: Set DNS policy.
 	DNSPolicy DNSPolicy `json:"dnsPolicy"`
 }
 
@@ -1136,3 +1226,163 @@ type List struct {
 
 	Items []runtime.Object `json:"items"`
 }
+
+// A type of object that is limited
+type LimitType string
+
+const (
+	// Limit that applies to all pods in a namespace
+	LimitTypePod LimitType = "Pod"
+	// Limit that applies to all containers in a namespace
+	LimitTypeContainer LimitType = "Container"
+)
+
+// LimitRangeItem defines a min/max usage limit for any resource that matches on kind
+type LimitRangeItem struct {
+	// Type of resource that this limit applies to
+	Type LimitType `json:"type,omitempty"`
+	// Max usage constraints on this kind by resource name
+	Max ResourceList `json:"max,omitempty"`
+	// Min usage constraints on this kind by resource name
+	Min ResourceList `json:"min,omitempty"`
+}
+
+// LimitRangeSpec defines a min/max usage limit for resources that match on kind
+type LimitRangeSpec struct {
+	// Limits is the list of LimitRangeItem objects that are enforced
+	Limits []LimitRangeItem `json:"limits"`
+}
+
+// LimitRange sets resource usage limits for each kind of resource in a Namespace
+type LimitRange struct {
+	TypeMeta   `json:",inline"`
+	ObjectMeta `json:"metadata,omitempty"`
+
+	// Spec defines the limits enforced
+	Spec LimitRangeSpec `json:"spec,omitempty"`
+}
+
+// LimitRangeList is a list of LimitRange items.
+type LimitRangeList struct {
+	TypeMeta `json:",inline"`
+	ListMeta `json:"metadata,omitempty"`
+
+	// Items is a list of LimitRange objects
+	Items []LimitRange `json:"items"`
+}
+
+// The following identify resource constants for Kubernetes object types
+const (
+	// Pods, number
+	ResourcePods ResourceName = "pods"
+	// Services, number
+	ResourceServices ResourceName = "services"
+	// ReplicationControllers, number
+	ResourceReplicationControllers ResourceName = "replicationcontrollers"
+	// ResourceQuotas, number
+	ResourceQuotas ResourceName = "resourcequotas"
+)
+
+// ResourceQuotaSpec defines the desired hard limits to enforce for Quota
+type ResourceQuotaSpec struct {
+	// Hard is the set of desired hard limits for each named resource
+	Hard ResourceList `json:"hard,omitempty"`
+}
+
+// ResourceQuotaStatus defines the enforced hard limits and observed use
+type ResourceQuotaStatus struct {
+	// Hard is the set of enforced hard limits for each named resource
+	Hard ResourceList `json:"hard,omitempty"`
+	// Used is the current observed total usage of the resource in the namespace
+	Used ResourceList `json:"used,omitempty"`
+}
+
+// ResourceQuota sets aggregate quota restrictions enforced per namespace
+type ResourceQuota struct {
+	TypeMeta   `json:",inline"`
+	ObjectMeta `json:"metadata,omitempty"`
+
+	// Spec defines the desired quota
+	Spec ResourceQuotaSpec `json:"spec,omitempty"`
+
+	// Status defines the actual enforced quota and its current usage
+	Status ResourceQuotaStatus `json:"status,omitempty"`
+}
+
+// ResourceQuotaUsage captures system observed quota status per namespace
+// It is used to enforce atomic updates of a backing ResourceQuota.Status field in storage
+type ResourceQuotaUsage struct {
+	TypeMeta   `json:",inline"`
+	ObjectMeta `json:"metadata,omitempty"`
+
+	// Status defines the actual enforced quota and its current usage
+	Status ResourceQuotaStatus `json:"status,omitempty"`
+}
+
+// ResourceQuotaList is a list of ResourceQuota items
+type ResourceQuotaList struct {
+	TypeMeta `json:",inline"`
+	ListMeta `json:"metadata,omitempty"`
+
+	// Items is a list of ResourceQuota objects
+	Items []ResourceQuota `json:"items"`
+}
+
+// Secret holds secret data of a certain type.  The total bytes of the values in
+// the Data field must be less than MaxSecretSize bytes.
+type Secret struct {
+	TypeMeta   `json:",inline"`
+	ObjectMeta `json:"metadata,omitempty"`
+
+	// Data contains the secret data.  Each key must be a valid DNS_SUBDOMAIN.
+	// The serialized form of the secret data is a base64 encoded string,
+	// representing the arbitrary (possibly non-string) data value here.
+	Data map[string][]byte `json:"data,omitempty"`
+
+	// Used to facilitate programatic handling of secret data.
+	Type SecretType `json:"type,omitempty"`
+}
+
+const MaxSecretSize = 1 * 1024 * 1024
+
+type SecretType string
+
+const (
+	SecretTypeOpaque SecretType = "Opaque" // Default; arbitrary user-defined data
+)
+
+type SecretList struct {
+	TypeMeta `json:",inline"`
+	ListMeta `json:"metadata,omitempty"`
+
+	Items []Secret `json:"items"`
+}
+
+// These constants are for remote command execution and port forwarding and are
+// used by both the client side and server side components.
+//
+// This is probably not the ideal place for them, but it didn't seem worth it
+// to create pkg/exec and pkg/portforward just to contain a single file with
+// constants in it.  Suggestions for more appropriate alternatives are
+// definitely welcome!
+const (
+	// Enable stdin for remote command execution
+	ExecStdinParam = "input"
+	// Enable stdout for remote command execution
+	ExecStdoutParam = "output"
+	// Enable stderr for remote command execution
+	ExecStderrParam = "error"
+	// Enable TTY for remote command execution
+	ExecTTYParam = "tty"
+	// Command to run for remote command execution
+	ExecCommandParamm = "command"
+
+	StreamType       = "streamType"
+	StreamTypeStdin  = "stdin"
+	StreamTypeStdout = "stdout"
+	StreamTypeStderr = "stderr"
+	StreamTypeData   = "data"
+	StreamTypeError  = "error"
+
+	PortHeader = "port"
+)

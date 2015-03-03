@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"text/template"
@@ -31,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/docker/docker/pkg/units"
 	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
 )
@@ -215,12 +218,17 @@ func (h *HumanReadablePrinter) validatePrintHandlerFunc(printFunc reflect.Value)
 	return nil
 }
 
-var podColumns = []string{"POD", "IP", "CONTAINER(S)", "IMAGE(S)", "HOST", "LABELS", "STATUS"}
+var podColumns = []string{"POD", "IP", "CONTAINER(S)", "IMAGE(S)", "HOST", "LABELS", "STATUS", "CREATED"}
 var replicationControllerColumns = []string{"CONTROLLER", "CONTAINER(S)", "IMAGE(S)", "SELECTOR", "REPLICAS"}
 var serviceColumns = []string{"NAME", "LABELS", "SELECTOR", "IP", "PORT"}
-var minionColumns = []string{"NAME", "LABELS", "STATUS"}
+var endpointColumns = []string{"NAME", "ENDPOINTS"}
+var nodeColumns = []string{"NAME", "LABELS", "STATUS"}
 var statusColumns = []string{"STATUS"}
-var eventColumns = []string{"TIME", "NAME", "KIND", "SUBOBJECT", "REASON", "SOURCE", "MESSAGE"}
+var eventColumns = []string{"FIRSTSEEN", "LASTSEEN", "COUNT", "NAME", "KIND", "SUBOBJECT", "REASON", "SOURCE", "MESSAGE"}
+var limitRangeColumns = []string{"NAME"}
+var resourceQuotaColumns = []string{"NAME"}
+var namespaceColumns = []string{"NAME", "LABELS"}
+var secretColumns = []string{"NAME", "DATA"}
 
 // addDefaultHandlers adds print handlers for default Kubernetes types.
 func (h *HumanReadablePrinter) addDefaultHandlers() {
@@ -230,11 +238,21 @@ func (h *HumanReadablePrinter) addDefaultHandlers() {
 	h.Handler(replicationControllerColumns, printReplicationControllerList)
 	h.Handler(serviceColumns, printService)
 	h.Handler(serviceColumns, printServiceList)
-	h.Handler(minionColumns, printMinion)
-	h.Handler(minionColumns, printMinionList)
+	h.Handler(endpointColumns, printEndpoints)
+	h.Handler(endpointColumns, printEndpointsList)
+	h.Handler(nodeColumns, printNode)
+	h.Handler(nodeColumns, printNodeList)
 	h.Handler(statusColumns, printStatus)
 	h.Handler(eventColumns, printEvent)
 	h.Handler(eventColumns, printEventList)
+	h.Handler(limitRangeColumns, printLimitRange)
+	h.Handler(limitRangeColumns, printLimitRangeList)
+	h.Handler(resourceQuotaColumns, printResourceQuota)
+	h.Handler(resourceQuotaColumns, printResourceQuotaList)
+	h.Handler(namespaceColumns, printNamespace)
+	h.Handler(namespaceColumns, printNamespaceList)
+	h.Handler(secretColumns, printSecret)
+	h.Handler(secretColumns, printSecretList)
 }
 
 func (h *HumanReadablePrinter) unknown(data []byte, w io.Writer) error {
@@ -247,6 +265,18 @@ func (h *HumanReadablePrinter) printHeader(columnNames []string, w io.Writer) er
 		return err
 	}
 	return nil
+}
+
+func formatEndpoints(endpoints []api.Endpoint) string {
+	if len(endpoints) == 0 {
+		return "<none>"
+	}
+	list := []string{}
+	for i := range endpoints {
+		ep := &endpoints[i]
+		list = append(list, net.JoinHostPort(ep.IP, strconv.Itoa(ep.Port)))
+	}
+	return strings.Join(list, ",")
 }
 
 func podHostString(host, ip string) string {
@@ -267,20 +297,21 @@ func printPod(pod *api.Pod, w io.Writer) error {
 	if len(containers) > 0 {
 		firstContainer, containers = containers[0], containers[1:]
 	}
-	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		pod.Name,
 		pod.Status.PodIP,
 		firstContainer.Name,
 		firstContainer.Image,
 		podHostString(pod.Status.Host, pod.Status.HostIP),
 		formatLabels(pod.Labels),
-		pod.Status.Phase)
+		pod.Status.Phase,
+		units.HumanDuration(time.Now().Sub(pod.CreationTimestamp.Time)))
 	if err != nil {
 		return err
 	}
 	// Lay out all the other containers on separate lines.
 	for _, container := range containers {
-		_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "", "", container.Name, container.Image, "", "", "")
+		_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "", "", container.Name, container.Image, "", "", "", "")
 		if err != nil {
 			return err
 		}
@@ -346,33 +377,76 @@ func printServiceList(list *api.ServiceList, w io.Writer) error {
 	return nil
 }
 
-func printMinion(minion *api.Node, w io.Writer) error {
-	conditionMap := make(map[api.NodeConditionKind]*api.NodeCondition)
-	NodeAllConditions := []api.NodeConditionKind{api.NodeReady, api.NodeReachable}
-	for i := range minion.Status.Conditions {
-		cond := minion.Status.Conditions[i]
-		conditionMap[cond.Kind] = &cond
+func printEndpoints(endpoint *api.Endpoints, w io.Writer) error {
+	_, err := fmt.Fprintf(w, "%s\t%s\n", endpoint.Name, formatEndpoints(endpoint.Endpoints))
+	return err
+}
+
+func printEndpointsList(list *api.EndpointsList, w io.Writer) error {
+	for _, item := range list.Items {
+		if err := printEndpoints(&item, w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printNamespace(item *api.Namespace, w io.Writer) error {
+	_, err := fmt.Fprintf(w, "%s\t%s\n", item.Name, formatLabels(item.Labels))
+	return err
+}
+
+func printNamespaceList(list *api.NamespaceList, w io.Writer) error {
+	for _, item := range list.Items {
+		if err := printNamespace(&item, w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printSecret(item *api.Secret, w io.Writer) error {
+	_, err := fmt.Fprintf(w, "%s\t%v\n", item.Name, len(item.Data))
+	return err
+}
+
+func printSecretList(list *api.SecretList, w io.Writer) error {
+	for _, item := range list.Items {
+		if err := printSecret(&item, w); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func printNode(node *api.Node, w io.Writer) error {
+	conditionMap := make(map[api.NodeConditionType]*api.NodeCondition)
+	NodeAllConditions := []api.NodeConditionType{api.NodeReady, api.NodeReachable}
+	for i := range node.Status.Conditions {
+		cond := node.Status.Conditions[i]
+		conditionMap[cond.Type] = &cond
 	}
 	var status []string
 	for _, validCondition := range NodeAllConditions {
 		if condition, ok := conditionMap[validCondition]; ok {
 			if condition.Status == api.ConditionFull {
-				status = append(status, string(condition.Kind))
+				status = append(status, string(condition.Type))
 			} else {
-				status = append(status, "Not"+string(condition.Kind))
+				status = append(status, "Not"+string(condition.Type))
 			}
 		}
 	}
 	if len(status) == 0 {
 		status = append(status, "Unknown")
 	}
-	_, err := fmt.Fprintf(w, "%s\t%s\t%s\n", minion.Name, formatLabels(minion.Labels), strings.Join(status, ","))
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\n", node.Name, formatLabels(node.Labels), strings.Join(status, ","))
 	return err
 }
 
-func printMinionList(list *api.NodeList, w io.Writer) error {
-	for _, minion := range list.Items {
-		if err := printMinion(&minion, w); err != nil {
+func printNodeList(list *api.NodeList, w io.Writer) error {
+	for _, node := range list.Items {
+		if err := printNode(&node, w); err != nil {
 			return err
 		}
 	}
@@ -386,8 +460,10 @@ func printStatus(status *api.Status, w io.Writer) error {
 
 func printEvent(event *api.Event, w io.Writer) error {
 	_, err := fmt.Fprintf(
-		w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		event.Timestamp.Time.Format(time.RFC1123Z),
+		w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		event.FirstTimestamp.Time.Format(time.RFC1123Z),
+		event.LastTimestamp.Time.Format(time.RFC1123Z),
+		event.Count,
 		event.InvolvedObject.Name,
 		event.InvolvedObject.Kind,
 		event.InvolvedObject.FieldPath,
@@ -403,6 +479,42 @@ func printEventList(list *api.EventList, w io.Writer) error {
 	sort.Sort(SortableEvents(list.Items))
 	for i := range list.Items {
 		if err := printEvent(&list.Items[i], w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printLimitRange(limitRange *api.LimitRange, w io.Writer) error {
+	_, err := fmt.Fprintf(
+		w, "%s\n",
+		limitRange.Name,
+	)
+	return err
+}
+
+// Prints the LimitRangeList in a human-friendly format.
+func printLimitRangeList(list *api.LimitRangeList, w io.Writer) error {
+	for i := range list.Items {
+		if err := printLimitRange(&list.Items[i], w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printResourceQuota(resourceQuota *api.ResourceQuota, w io.Writer) error {
+	_, err := fmt.Fprintf(
+		w, "%s\n",
+		resourceQuota.Name,
+	)
+	return err
+}
+
+// Prints the ResourceQuotaList in a human-friendly format.
+func printResourceQuotaList(list *api.ResourceQuotaList, w io.Writer) error {
+	for i := range list.Items {
+		if err := printResourceQuota(&list.Items[i], w); err != nil {
 			return err
 		}
 	}

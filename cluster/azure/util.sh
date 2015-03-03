@@ -343,6 +343,7 @@ function kube-up {
         echo "mkdir -p /var/cache/kubernetes-install"
         echo "cd /var/cache/kubernetes-install"
         echo "readonly MASTER_NAME='${MASTER_NAME}'"
+        echo "readonly INSTANCE_PREFIX='${INSTANCE_PREFIX}'"
         echo "readonly NODE_INSTANCE_PREFIX='${INSTANCE_PREFIX}-minion'"
         echo "readonly SERVER_BINARY_TAR_URL='${SERVER_BINARY_TAR_URL}'"
         echo "readonly SALT_TAR_URL='${SALT_TAR_URL}'"
@@ -363,16 +364,14 @@ function kube-up {
             -subj "/CN=azure-ssh-key"
     fi
 
-    if [[ -z "$(azure_call network vnet show $AZ_VNET 2>/dev/null | grep data)" ]]; then
-        #azure network vnet create with $AZ_SUBNET
-        #FIXME not working
+    if [[ -z "$(azure_call network vnet show "$AZ_VNET" 2>/dev/null | grep data)" ]]; then
         echo error create vnet $AZ_VNET with subnet $AZ_SUBNET
         exit 1
     fi
 
     echo "--> Starting VM"
     azure_call vm create \
-        -w $AZ_VNET \
+        -w "$AZ_VNET" \
         -n $MASTER_NAME \
         -l "$AZ_LOCATION" \
         -t $AZ_SSH_CERT \
@@ -399,7 +398,7 @@ function kube-up {
 
         echo "--> Starting VM"
         azure_call vm create \
-            -c -w $AZ_VNET \
+            -c -w "$AZ_VNET" \
             -n ${MINION_NAMES[$i]} \
             -l "$AZ_LOCATION" \
             -t $AZ_SSH_CERT \
@@ -555,6 +554,11 @@ function ssh-to-node {
 # Restart the kube-proxy on a node ($1)
 function restart-kube-proxy {
     ssh-to-node "$1" "sudo /etc/init.d/kube-proxy restart"
+}
+
+# Restart the kube-proxy on the master ($1)
+function restart-apiserver {
+    ssh-to-node "$1" "sudo /etc/init.d/kube-apiserver restart"
 }
 
 # Setup monitoring using heapster and InfluxDB

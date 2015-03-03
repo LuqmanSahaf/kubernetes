@@ -47,8 +47,100 @@ func DescriberFor(kind string, c *client.Client) (Describer, bool) {
 		return &ServiceDescriber{c}, true
 	case "Minion", "Node":
 		return &MinionDescriber{c}, true
+	case "LimitRange":
+		return &LimitRangeDescriber{c}, true
+	case "ResourceQuota":
+		return &ResourceQuotaDescriber{c}, true
 	}
 	return nil, false
+}
+
+// LimitRangeDescriber generates information about a limit range
+type LimitRangeDescriber struct {
+	client.Interface
+}
+
+func (d *LimitRangeDescriber) Describe(namespace, name string) (string, error) {
+	lr := d.LimitRanges(namespace)
+
+	limitRange, err := lr.Get(name)
+	if err != nil {
+		return "", err
+	}
+
+	return tabbedString(func(out io.Writer) error {
+		fmt.Fprintf(out, "Name:\t%s\n", limitRange.Name)
+		fmt.Fprintf(out, "Type\tResource\tMin\tMax\n")
+		fmt.Fprintf(out, "----\t--------\t---\t---\n")
+		for i := range limitRange.Spec.Limits {
+			item := limitRange.Spec.Limits[i]
+			maxResources := item.Max
+			minResources := item.Min
+
+			set := map[api.ResourceName]bool{}
+			for k := range maxResources {
+				set[k] = true
+			}
+			for k := range minResources {
+				set[k] = true
+			}
+
+			for k := range set {
+				// if no value is set, we output -
+				maxValue := "-"
+				minValue := "-"
+
+				maxQuantity, maxQuantityFound := maxResources[k]
+				if maxQuantityFound {
+					maxValue = maxQuantity.String()
+				}
+
+				minQuantity, minQuantityFound := minResources[k]
+				if minQuantityFound {
+					minValue = minQuantity.String()
+				}
+
+				msg := "%v\t%v\t%v\t%v\n"
+				fmt.Fprintf(out, msg, item.Type, k, minValue, maxValue)
+			}
+		}
+		return nil
+	})
+}
+
+// ResourceQuotaDescriber generates information about a resource quota
+type ResourceQuotaDescriber struct {
+	client.Interface
+}
+
+func (d *ResourceQuotaDescriber) Describe(namespace, name string) (string, error) {
+	rq := d.ResourceQuotas(namespace)
+
+	resourceQuota, err := rq.Get(name)
+	if err != nil {
+		return "", err
+	}
+
+	return tabbedString(func(out io.Writer) error {
+		fmt.Fprintf(out, "Name:\t%s\n", resourceQuota.Name)
+		fmt.Fprintf(out, "Resource\tUsed\tHard\n")
+		fmt.Fprintf(out, "--------\t----\t----\n")
+
+		resources := []api.ResourceName{}
+		for resource := range resourceQuota.Status.Hard {
+			resources = append(resources, resource)
+		}
+		sort.Sort(SortableResourceNames(resources))
+
+		msg := "%v\t%v\t%v\n"
+		for i := range resources {
+			resource := resources[i]
+			hardQuantity := resourceQuota.Status.Hard[resource]
+			usedQuantity := resourceQuota.Status.Used[resource]
+			fmt.Fprintf(out, msg, resource, usedQuantity.String(), hardQuantity.String())
+		}
+		return nil
+	})
 }
 
 // PodDescriber generates information about a pod and the replication controllers that
@@ -101,6 +193,14 @@ func (d *PodDescriber) Describe(namespace, name string) (string, error) {
 		fmt.Fprintf(out, "Labels:\t%s\n", formatLabels(pod.Labels))
 		fmt.Fprintf(out, "Status:\t%s\n", string(pod.Status.Phase))
 		fmt.Fprintf(out, "Replication Controllers:\t%s\n", getReplicationControllersForLabels(rc, labels.Set(pod.Labels)))
+		if len(pod.Status.Conditions) > 0 {
+			fmt.Fprint(out, "Conditions:\n  Type\tStatus\n")
+			for _, c := range pod.Status.Conditions {
+				fmt.Fprintf(out, "  %v \t%v \n",
+					c.Type,
+					c.Status)
+			}
+		}
 		if events != nil {
 			describeEvents(events, out)
 		}
@@ -157,13 +257,25 @@ func (d *ServiceDescriber) Describe(namespace, name string) (string, error) {
 		return "", err
 	}
 
+	endpoints, err := d.Endpoints(namespace).Get(name)
+	if err != nil {
+		endpoints = &api.Endpoints{}
+	}
+
 	events, _ := d.Events(namespace).Search(service)
 
 	return tabbedString(func(out io.Writer) error {
 		fmt.Fprintf(out, "Name:\t%s\n", service.Name)
 		fmt.Fprintf(out, "Labels:\t%s\n", formatLabels(service.Labels))
 		fmt.Fprintf(out, "Selector:\t%s\n", formatLabels(service.Spec.Selector))
+		fmt.Fprintf(out, "IP:\t%s\n", service.Spec.PortalIP)
+		if len(service.Spec.PublicIPs) > 0 {
+			list := strings.Join(service.Spec.PublicIPs, ", ")
+			fmt.Fprintf(out, "Public IPs:\t%s\n", list)
+		}
 		fmt.Fprintf(out, "Port:\t%d\n", service.Spec.Port)
+		fmt.Fprintf(out, "Endpoints:\t%s\n", formatEndpoints(endpoints.Endpoints))
+		fmt.Fprintf(out, "Session Affinity:\t%s\n", service.Spec.SessionAffinity)
 		if events != nil {
 			describeEvents(events, out)
 		}
@@ -183,10 +295,47 @@ func (d *MinionDescriber) Describe(namespace, name string) (string, error) {
 		return "", err
 	}
 
+	var pods []api.Pod
+	allPods, err := d.Pods(namespace).List(labels.Everything())
+	if err != nil {
+		return "", err
+	}
+	for _, pod := range allPods.Items {
+		if pod.Status.Host != name {
+			continue
+		}
+		pods = append(pods, pod)
+	}
+
 	events, _ := d.Events(namespace).Search(minion)
 
 	return tabbedString(func(out io.Writer) error {
 		fmt.Fprintf(out, "Name:\t%s\n", minion.Name)
+		if len(minion.Status.Conditions) > 0 {
+			fmt.Fprint(out, "Conditions:\n  Type\tStatus\tLastProbeTime\tLastTransitionTime\tReason\tMessage\n")
+			for _, c := range minion.Status.Conditions {
+				fmt.Fprintf(out, "  %v \t%v \t%s \t%s \t%v \t%v\n",
+					c.Type,
+					c.Status,
+					c.LastProbeTime.Time.Format(time.RFC1123Z),
+					c.LastTransitionTime.Time.Format(time.RFC1123Z),
+					c.Reason,
+					c.Message)
+			}
+		}
+		if len(minion.Spec.Capacity) > 0 {
+			fmt.Fprintf(out, "Capacity:\n")
+			for resource, value := range minion.Spec.Capacity {
+				fmt.Fprintf(out, " %s:\t%s\n", resource, value.String())
+			}
+		}
+		fmt.Fprintf(out, "Pods:\t(%d in total)\n", len(pods))
+		for _, pod := range pods {
+			if pod.Status.Host != name {
+				continue
+			}
+			fmt.Fprintf(out, "  %s\n", pod.Name)
+		}
 		if events != nil {
 			describeEvents(events, out)
 		}
@@ -200,10 +349,12 @@ func describeEvents(el *api.EventList, w io.Writer) {
 		return
 	}
 	sort.Sort(SortableEvents(el.Items))
-	fmt.Fprint(w, "Events:\nTime\tFrom\tSubobjectPath\tReason\tMessage\n")
+	fmt.Fprint(w, "Events:\n  FirstSeen\tLastSeen\tCount\tFrom\tSubobjectPath\tReason\tMessage\n")
 	for _, e := range el.Items {
-		fmt.Fprintf(w, "%s\t%v\t%v\t%v\t%v\t%v\n",
-			e.Timestamp.Time.Format(time.RFC1123Z),
+		fmt.Fprintf(w, "  %s\t%s\t%d\t%v\t%v\t%v\t%v\n",
+			e.FirstTimestamp.Time.Format(time.RFC1123Z),
+			e.LastTimestamp.Time.Format(time.RFC1123Z),
+			e.Count,
 			e.Source,
 			e.InvolvedObject.FieldPath,
 			e.Reason,

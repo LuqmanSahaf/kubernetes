@@ -20,10 +20,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"path"
 	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -32,24 +34,51 @@ import (
 // For testing, bypass HandleCrash.
 var ReallyCrash bool
 
+// PanicHandlers is a list of functions which will be invoked when a panic happens.
+var PanicHandlers = []func(interface{}){logPanic}
+
 // HandleCrash simply catches a crash and logs an error. Meant to be called via defer.
 func HandleCrash() {
 	if ReallyCrash {
 		return
 	}
-
-	r := recover()
-	if r != nil {
-		callers := ""
-		for i := 0; true; i++ {
-			_, file, line, ok := runtime.Caller(i)
-			if !ok {
-				break
-			}
-			callers = callers + fmt.Sprintf("%v:%v\n", file, line)
+	if r := recover(); r != nil {
+		for _, fn := range PanicHandlers {
+			fn(r)
 		}
-		glog.Infof("Recovered from panic: %#v (%v)\n%v", r, r, callers)
 	}
+}
+
+// logPanic logs the caller tree when a panic occurs.
+func logPanic(r interface{}) {
+	callers := ""
+	for i := 0; true; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if !ok {
+			break
+		}
+		callers = callers + fmt.Sprintf("%v:%v\n", file, line)
+	}
+	glog.Infof("Recovered from panic: %#v (%v)\n%v", r, r, callers)
+}
+
+// ErrorHandlers is a list of functions which will be invoked when an unreturnable
+// error occurs.
+var ErrorHandlers = []func(error){logError}
+
+// HandlerError is a method to invoke when a non-user facing piece of code cannot
+// return an error and needs to indicate it has been ignored. Invoking this method
+// is preferable to logging the error - the default behavior is to log but the
+// errors may be sent to a remote server for analysis.
+func HandleError(err error) {
+	for _, fn := range ErrorHandlers {
+		fn(err)
+	}
+}
+
+// logError prints an error with the call stack of the location it was reported
+func logError(err error) {
+	glog.ErrorDepth(2, err)
 }
 
 // Forever loops forever running f every period.  Catches any panics, and keeps going.
@@ -146,14 +175,24 @@ func CompileRegexps(regexpStrings []string) ([]*regexp.Regexp, error) {
 	return regexps, nil
 }
 
-// Writes 'value' to /proc/self/oom_score_adj.
-func ApplyOomScoreAdj(value int) error {
+// Writes 'value' to /proc/<pid>/oom_score_adj. PID = 0 means self
+func ApplyOomScoreAdj(pid int, value int) error {
 	if value < -1000 || value > 1000 {
 		return fmt.Errorf("invalid value(%d) specified for oom_score_adj. Values must be within the range [-1000, 1000]", value)
 	}
+	if pid < 0 {
+		return fmt.Errorf("invalid PID %d specified for oom_score_adj", pid)
+	}
 
-	if err := ioutil.WriteFile("/proc/self/oom_score_adj", []byte(strconv.Itoa(value)), 0700); err != nil {
-		fmt.Errorf("failed to set oom_score_adj to %d - %q", value, err)
+	var pidStr string
+	if pid == 0 {
+		pidStr = "self"
+	} else {
+		pidStr = strconv.Itoa(pid)
+	}
+
+	if err := ioutil.WriteFile(path.Join("/proc", pidStr, "oom_score_adj"), []byte(strconv.Itoa(value)), 0700); err != nil {
+		fmt.Errorf("failed to set oom_score_adj to %d: %v", value, err)
 	}
 
 	return nil
@@ -182,4 +221,21 @@ func AllPtrFieldsNil(obj interface{}) bool {
 		}
 	}
 	return true
+}
+
+// Splits a fully qualified name and returns its namespace and name.
+// Assumes that the input 'str' has been validated.
+func SplitQualifiedName(str string) (string, string) {
+	parts := strings.Split(str, "/")
+	if len(parts) < 2 {
+		return "", str
+	}
+
+	return parts[0], parts[1]
+}
+
+// Joins 'namespace' and 'name' and returns a fully qualified name
+// Assumes that the input is valid.
+func JoinQualifiedName(namespace, name string) string {
+	return path.Join(namespace, name)
 }

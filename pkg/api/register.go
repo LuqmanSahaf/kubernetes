@@ -35,8 +35,6 @@ func init() {
 		&NodeList{},
 		&Node{},
 		&Status{},
-		&OperationList{},
-		&Operation{},
 		&Endpoints{},
 		&EndpointsList{},
 		&Binding{},
@@ -47,12 +45,19 @@ func init() {
 		&BoundPod{},
 		&BoundPods{},
 		&List{},
+		&LimitRange{},
+		&LimitRangeList{},
+		&ResourceQuota{},
+		&ResourceQuotaList{},
+		&ResourceQuotaUsage{},
+		&Namespace{},
+		&NamespaceList{},
+		&Secret{},
+		&SecretList{},
 	)
 	// Legacy names are supported
 	Scheme.AddKnownTypeWithName("", "Minion", &Node{})
 	Scheme.AddKnownTypeWithName("", "MinionList", &NodeList{})
-	Scheme.AddKnownTypeWithName("", "ServerOp", &Operation{})
-	Scheme.AddKnownTypeWithName("", "ServerOpList", &OperationList{})
 }
 
 func (*Pod) IsAnAPIObject()                       {}
@@ -68,8 +73,6 @@ func (*Node) IsAnAPIObject()                      {}
 func (*NodeList) IsAnAPIObject()                  {}
 func (*Binding) IsAnAPIObject()                   {}
 func (*Status) IsAnAPIObject()                    {}
-func (*Operation) IsAnAPIObject()                 {}
-func (*OperationList) IsAnAPIObject()             {}
 func (*Event) IsAnAPIObject()                     {}
 func (*EventList) IsAnAPIObject()                 {}
 func (*ContainerManifest) IsAnAPIObject()         {}
@@ -77,3 +80,12 @@ func (*ContainerManifestList) IsAnAPIObject()     {}
 func (*BoundPod) IsAnAPIObject()                  {}
 func (*BoundPods) IsAnAPIObject()                 {}
 func (*List) IsAnAPIObject()                      {}
+func (*LimitRange) IsAnAPIObject()                {}
+func (*LimitRangeList) IsAnAPIObject()            {}
+func (*ResourceQuota) IsAnAPIObject()             {}
+func (*ResourceQuotaList) IsAnAPIObject()         {}
+func (*ResourceQuotaUsage) IsAnAPIObject()        {}
+func (*Namespace) IsAnAPIObject()                 {}
+func (*NamespaceList) IsAnAPIObject()             {}
+func (*Secret) IsAnAPIObject()                    {}
+func (*SecretList) IsAnAPIObject()                {}

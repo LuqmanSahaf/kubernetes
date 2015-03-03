@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 
 	newer "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
@@ -79,6 +80,7 @@ func init() {
 		func(in *newer.ObjectMeta, out *TypeMeta, s conversion.Scope) error {
 			out.Namespace = in.Namespace
 			out.ID = in.Name
+			out.GenerateName = in.GenerateName
 			out.UID = in.UID
 			out.CreationTimestamp = in.CreationTimestamp
 			out.SelfLink = in.SelfLink
@@ -94,6 +96,7 @@ func init() {
 		func(in *TypeMeta, out *newer.ObjectMeta, s conversion.Scope) error {
 			out.Namespace = in.Namespace
 			out.Name = in.ID
+			out.GenerateName = in.GenerateName
 			out.UID = in.UID
 			out.CreationTimestamp = in.CreationTimestamp
 			out.SelfLink = in.SelfLink
@@ -179,6 +182,9 @@ func init() {
 			if err := s.Convert(&in.Phase, &out.Status, 0); err != nil {
 				return err
 			}
+			if err := s.Convert(&in.Conditions, &out.Conditions, 0); err != nil {
+				return err
+			}
 			if err := s.Convert(&in.Info, &out.Info, 0); err != nil {
 				return err
 			}
@@ -190,6 +196,9 @@ func init() {
 		},
 		func(in *PodState, out *newer.PodStatus, s conversion.Scope) error {
 			if err := s.Convert(&in.Status, &out.Phase, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Conditions, &out.Conditions, 0); err != nil {
 				return err
 			}
 			if err := s.Convert(&in.Info, &out.Info, 0); err != nil {
@@ -410,7 +419,13 @@ func init() {
 				return err
 			}
 			out.DesiredState.Host = in.Spec.Host
+			if err := s.Convert(&in.Spec.NodeSelector, &out.NodeSelector, 0); err != nil {
+				return err
+			}
 			if err := s.Convert(&in.ObjectMeta.Labels, &out.Labels, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta.Annotations, &out.Annotations, 0); err != nil {
 				return err
 			}
 			return nil
@@ -420,7 +435,13 @@ func init() {
 				return err
 			}
 			out.Spec.Host = in.DesiredState.Host
+			if err := s.Convert(&in.NodeSelector, &out.Spec.NodeSelector, 0); err != nil {
+				return err
+			}
 			if err := s.Convert(&in.Labels, &out.ObjectMeta.Labels, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Annotations, &out.ObjectMeta.Annotations, 0); err != nil {
 				return err
 			}
 			return nil
@@ -438,7 +459,146 @@ func init() {
 			}
 			return nil
 		},
-
+		// Converts internal Container to v1beta1.Container.
+		// Fields 'CPU' and 'Memory' are not present in the internal Container object.
+		// Hence the need for a custom conversion function.
+		func(in *newer.Container, out *Container, s conversion.Scope) error {
+			if err := s.Convert(&in.Name, &out.Name, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Image, &out.Image, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Command, &out.Command, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.WorkingDir, &out.WorkingDir, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Ports, &out.Ports, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Env, &out.Env, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Resources, &out.Resources, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(in.Resources.Limits.Cpu(), &out.CPU, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(in.Resources.Limits.Memory(), &out.Memory, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.VolumeMounts, &out.VolumeMounts, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.LivenessProbe, &out.LivenessProbe, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ReadinessProbe, &out.ReadinessProbe, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Lifecycle, &out.Lifecycle, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TerminationMessagePath, &out.TerminationMessagePath, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Privileged, &out.Privileged, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ImagePullPolicy, &out.ImagePullPolicy, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Capabilities, &out.Capabilities, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		// Internal API does not support CPU to be specified via an explicit field.
+		// Hence it must be stored in Container.Resources.
+		func(in *int, out *newer.ResourceList, s conversion.Scope) error {
+			if *in <= 0 {
+				return nil
+			}
+			quantity := resource.Quantity{}
+			if err := s.Convert(in, &quantity, 0); err != nil {
+				return err
+			}
+			(*out)[newer.ResourceCPU] = quantity
+			return nil
+		},
+		// Internal API does not support Memory to be specified via an explicit field.
+		// Hence it must be stored in Container.Resources.
+		func(in *int64, out *newer.ResourceList, s conversion.Scope) error {
+			if *in <= 0 {
+				return nil
+			}
+			quantity := resource.Quantity{}
+			if err := s.Convert(in, &quantity, 0); err != nil {
+				return err
+			}
+			(*out)[newer.ResourceMemory] = quantity
+			return nil
+		},
+		// Converts v1beta1.Container to internal Container.
+		// Fields 'CPU' and 'Memory' are not present in the internal Container object.
+		// Hence the need for a custom conversion function.
+		func(in *Container, out *newer.Container, s conversion.Scope) error {
+			if err := s.Convert(&in.Name, &out.Name, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Image, &out.Image, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Command, &out.Command, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.WorkingDir, &out.WorkingDir, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Ports, &out.Ports, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Env, &out.Env, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Resources, &out.Resources, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.CPU, &out.Resources.Limits, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Memory, &out.Resources.Limits, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.VolumeMounts, &out.VolumeMounts, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.LivenessProbe, &out.LivenessProbe, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ReadinessProbe, &out.ReadinessProbe, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Lifecycle, &out.Lifecycle, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TerminationMessagePath, &out.TerminationMessagePath, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Privileged, &out.Privileged, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ImagePullPolicy, &out.ImagePullPolicy, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Capabilities, &out.Capabilities, 0); err != nil {
+				return err
+			}
+			return nil
+		},
 		func(in *newer.PodSpec, out *ContainerManifest, s conversion.Scope) error {
 			if err := s.Convert(&in.Volumes, &out.Volumes, 0); err != nil {
 				return err
@@ -487,7 +647,6 @@ func init() {
 			out.PublicIPs = in.Spec.PublicIPs
 			out.ContainerPort = in.Spec.ContainerPort
 			out.PortalIP = in.Spec.PortalIP
-			out.ProxyPort = in.Spec.ProxyPort
 			if err := s.Convert(&in.Spec.SessionAffinity, &out.SessionAffinity, 0); err != nil {
 				return err
 			}
@@ -514,7 +673,6 @@ func init() {
 			out.Spec.PublicIPs = in.PublicIPs
 			out.Spec.ContainerPort = in.ContainerPort
 			out.Spec.PortalIP = in.PortalIP
-			out.Spec.ProxyPort = in.ProxyPort
 			if err := s.Convert(&in.SessionAffinity, &out.Spec.SessionAffinity, 0); err != nil {
 				return err
 			}
@@ -540,6 +698,8 @@ func init() {
 			}
 
 			out.HostIP = in.Status.HostIP
+			out.PodCIDR = in.Spec.PodCIDR
+			out.ExternalID = in.Spec.ExternalID
 			return s.Convert(&in.Spec.Capacity, &out.NodeResources.Capacity, 0)
 		},
 		func(in *Minion, out *newer.Node, s conversion.Scope) error {
@@ -560,9 +720,179 @@ func init() {
 			}
 
 			out.Status.HostIP = in.HostIP
+			out.Spec.PodCIDR = in.PodCIDR
+			out.Spec.ExternalID = in.ExternalID
 			return s.Convert(&in.NodeResources.Capacity, &out.Spec.Capacity, 0)
 		},
-
+		func(in *newer.LimitRange, out *LimitRange, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Spec, &out.Spec, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *LimitRange, out *newer.LimitRange, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Spec, &out.Spec, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *Namespace, out *newer.Namespace, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Spec, &out.Spec, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Labels, &out.ObjectMeta.Labels, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *newer.LimitRangeSpec, out *LimitRangeSpec, s conversion.Scope) error {
+			*out = LimitRangeSpec{}
+			out.Limits = make([]LimitRangeItem, len(in.Limits), len(in.Limits))
+			for i := range in.Limits {
+				if err := s.Convert(&in.Limits[i], &out.Limits[i], 0); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		func(in *LimitRangeSpec, out *newer.LimitRangeSpec, s conversion.Scope) error {
+			*out = newer.LimitRangeSpec{}
+			out.Limits = make([]newer.LimitRangeItem, len(in.Limits), len(in.Limits))
+			for i := range in.Limits {
+				if err := s.Convert(&in.Limits[i], &out.Limits[i], 0); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		func(in *newer.LimitRangeItem, out *LimitRangeItem, s conversion.Scope) error {
+			*out = LimitRangeItem{}
+			out.Type = LimitType(in.Type)
+			if err := s.Convert(&in.Max, &out.Max, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Min, &out.Min, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *LimitRangeItem, out *newer.LimitRangeItem, s conversion.Scope) error {
+			*out = newer.LimitRangeItem{}
+			out.Type = newer.LimitType(in.Type)
+			if err := s.Convert(&in.Max, &out.Max, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Min, &out.Min, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *newer.ResourceQuota, out *ResourceQuota, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Spec, &out.Spec, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *ResourceQuota, out *newer.ResourceQuota, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Spec, &out.Spec, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *newer.ResourceQuotaUsage, out *ResourceQuotaUsage, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *ResourceQuotaUsage, out *newer.ResourceQuotaUsage, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *newer.ResourceQuotaSpec, out *ResourceQuotaSpec, s conversion.Scope) error {
+			*out = ResourceQuotaSpec{}
+			if err := s.Convert(&in.Hard, &out.Hard, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *ResourceQuotaSpec, out *newer.ResourceQuotaSpec, s conversion.Scope) error {
+			*out = newer.ResourceQuotaSpec{}
+			if err := s.Convert(&in.Hard, &out.Hard, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *newer.ResourceQuotaStatus, out *ResourceQuotaStatus, s conversion.Scope) error {
+			*out = ResourceQuotaStatus{}
+			if err := s.Convert(&in.Hard, &out.Hard, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Used, &out.Used, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *ResourceQuotaStatus, out *newer.ResourceQuotaStatus, s conversion.Scope) error {
+			*out = newer.ResourceQuotaStatus{}
+			if err := s.Convert(&in.Hard, &out.Hard, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Used, &out.Used, 0); err != nil {
+				return err
+			}
+			return nil
+		},
 		// Object ID <-> Name
 		// TODO: amend the conversion package to allow overriding specific fields.
 		func(in *ObjectReference, out *newer.ObjectReference, s conversion.Scope) error {
@@ -600,7 +930,11 @@ func init() {
 			out.Message = in.Message
 			out.Source = in.Source.Component
 			out.Host = in.Source.Host
-			out.Timestamp = in.Timestamp
+			out.Timestamp = in.FirstTimestamp
+			out.FirstTimestamp = in.FirstTimestamp
+			out.LastTimestamp = in.LastTimestamp
+			out.Count = in.Count
+
 			return s.Convert(&in.InvolvedObject, &out.InvolvedObject, 0)
 		},
 		func(in *Event, out *newer.Event, s conversion.Scope) error {
@@ -614,7 +948,16 @@ func init() {
 			out.Message = in.Message
 			out.Source.Component = in.Source
 			out.Source.Host = in.Host
-			out.Timestamp = in.Timestamp
+			if in.FirstTimestamp.IsZero() {
+				// Assume this is an old event that does not specify FirstTimestamp/LastTimestamp/Count
+				out.FirstTimestamp = in.Timestamp
+				out.LastTimestamp = in.Timestamp
+				out.Count = 1
+			} else {
+				out.FirstTimestamp = in.FirstTimestamp
+				out.LastTimestamp = in.LastTimestamp
+				out.Count = in.Count
+			}
 			return s.Convert(&in.InvolvedObject, &out.InvolvedObject, 0)
 		},
 
@@ -690,6 +1033,9 @@ func init() {
 			if err := s.Convert(&in.HostPath, &out.HostDir, 0); err != nil {
 				return err
 			}
+			if err := s.Convert(&in.Secret, &out.Secret, 0); err != nil {
+				return err
+			}
 			return nil
 		},
 		func(in *VolumeSource, out *newer.VolumeSource, s conversion.Scope) error {
@@ -703,6 +1049,9 @@ func init() {
 				return err
 			}
 			if err := s.Convert(&in.HostDir, &out.HostPath, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Secret, &out.Secret, 0); err != nil {
 				return err
 			}
 			return nil
@@ -740,7 +1089,226 @@ func init() {
 			}
 			return nil
 		},
+
+		func(in *newer.Probe, out *LivenessProbe, s conversion.Scope) error {
+			if err := s.Convert(&in.Exec, &out.Exec, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.HTTPGet, &out.HTTPGet, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TCPSocket, &out.TCPSocket, 0); err != nil {
+				return err
+			}
+			out.InitialDelaySeconds = in.InitialDelaySeconds
+			out.TimeoutSeconds = in.TimeoutSeconds
+			return nil
+		},
+		func(in *LivenessProbe, out *newer.Probe, s conversion.Scope) error {
+			if err := s.Convert(&in.Exec, &out.Exec, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.HTTPGet, &out.HTTPGet, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TCPSocket, &out.TCPSocket, 0); err != nil {
+				return err
+			}
+			out.InitialDelaySeconds = in.InitialDelaySeconds
+			out.TimeoutSeconds = in.TimeoutSeconds
+			return nil
+		},
+		func(in *newer.Endpoints, out *Endpoints, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Protocol, &out.Protocol, 0); err != nil {
+				return err
+			}
+			for i := range in.Endpoints {
+				ep := &in.Endpoints[i]
+				out.Endpoints = append(out.Endpoints, net.JoinHostPort(ep.IP, strconv.Itoa(ep.Port)))
+			}
+			return nil
+		},
+		func(in *Endpoints, out *newer.Endpoints, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Protocol, &out.Protocol, 0); err != nil {
+				return err
+			}
+			for i := range in.Endpoints {
+				out.Endpoints = append(out.Endpoints, newer.Endpoint{})
+				ep := &out.Endpoints[i]
+				host, port, err := net.SplitHostPort(in.Endpoints[i])
+				if err != nil {
+					return err
+				}
+				ep.IP = host
+				pn, err := strconv.Atoi(port)
+				if err != nil {
+					return err
+				}
+				ep.Port = pn
+			}
+			return nil
+		},
+
+		func(in *newer.NodeCondition, out *NodeCondition, s conversion.Scope) error {
+			if err := s.Convert(&in.Type, &out.Kind, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.LastProbeTime, &out.LastProbeTime, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.LastTransitionTime, &out.LastTransitionTime, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Reason, &out.Reason, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Message, &out.Message, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *NodeCondition, out *newer.NodeCondition, s conversion.Scope) error {
+			if err := s.Convert(&in.Kind, &out.Type, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.LastProbeTime, &out.LastProbeTime, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.LastTransitionTime, &out.LastTransitionTime, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Reason, &out.Reason, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Message, &out.Message, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+
+		func(in *newer.NodeConditionType, out *NodeConditionKind, s conversion.Scope) error {
+			switch *in {
+			case newer.NodeReachable:
+				*out = NodeReachable
+				break
+			case newer.NodeReady:
+				*out = NodeReady
+				break
+			case "":
+				*out = ""
+			default:
+				*out = NodeConditionKind(*in)
+				break
+			}
+
+			return nil
+		},
+		func(in *NodeConditionKind, out *newer.NodeConditionType, s conversion.Scope) error {
+			switch *in {
+			case NodeReachable:
+				*out = newer.NodeReachable
+				break
+			case NodeReady:
+				*out = newer.NodeReady
+				break
+			case "":
+				*out = ""
+			default:
+				*out = newer.NodeConditionType(*in)
+				break
+			}
+
+			return nil
+		},
+
+		func(in *newer.PodCondition, out *PodCondition, s conversion.Scope) error {
+			if err := s.Convert(&in.Type, &out.Kind, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *PodCondition, out *newer.PodCondition, s conversion.Scope) error {
+			if err := s.Convert(&in.Kind, &out.Type, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+
+		func(in *newer.PodConditionType, out *PodConditionKind, s conversion.Scope) error {
+			switch *in {
+			case newer.PodReady:
+				*out = PodReady
+				break
+			case "":
+				*out = ""
+			default:
+				*out = PodConditionKind(*in)
+				break
+			}
+
+			return nil
+		},
+		func(in *PodConditionKind, out *newer.PodConditionType, s conversion.Scope) error {
+			switch *in {
+			case PodReady:
+				*out = newer.PodReady
+				break
+			case "":
+				*out = ""
+			default:
+				*out = newer.PodConditionType(*in)
+				break
+			}
+
+			return nil
+		},
 	)
+	if err != nil {
+		// If one of the conversion functions is malformed, detect it immediately.
+		panic(err)
+	}
+
+	// Add field conversion funcs.
+	err = newer.Scheme.AddFieldLabelConversionFunc("v1beta1", "pods",
+		func(label, value string) (string, string, error) {
+			switch label {
+			case "name":
+				return "name", value, nil
+			case "DesiredState.Host":
+				return "Status.Host", value, nil
+			case "DesiredState.Status":
+				podStatus := PodStatus(value)
+				var internalValue newer.PodPhase
+				newer.Scheme.Convert(&podStatus, &internalValue)
+				return "Status.Phase", string(internalValue), nil
+			default:
+				return "", "", fmt.Errorf("field label not supported: %s", label)
+			}
+		})
 	if err != nil {
 		// If one of the conversion functions is malformed, detect it immediately.
 		panic(err)
