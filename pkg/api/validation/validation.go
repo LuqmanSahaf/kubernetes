@@ -971,10 +971,10 @@ func ValidatePodUpdate(newPod, oldPod *api.Pod) errs.ValidationErrorList {
 
 	allErrs = append(allErrs, ValidateObjectMetaUpdate(&newPod.ObjectMeta, &oldPod.ObjectMeta).Prefix("metadata")...)
 
-	if len(newPod.Spec.Containers) != len(oldPod.Spec.Containers) {
-		allErrs = append(allErrs, errs.NewFieldInvalid("spec.containers", newPod.Spec.Containers, "may not add or remove containers"))
-		return allErrs
-	}
+	// if len(newPod.Spec.Containers) != len(oldPod.Spec.Containers) {
+	// 	allErrs = append(allErrs, errs.NewFieldInvalid("spec.containers", newPod.Spec.Containers, "may not add or remove containers"))
+	// 	return allErrs
+	// }
 	pod := *newPod
 	// Tricky, we need to copy the container list so that we don't overwrite the update
 	var newContainers []api.Container
